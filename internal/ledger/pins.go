@@ -119,9 +119,11 @@ type pinCmd struct {
 
 var pinRe = regexp.MustCompile(`^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:@(branch|repo|global))?:`)
 
-// parsePin recognises PIN:, PIN!:, PIN@<scope>:, CARRY: and UNPIN: at the very start
-// of a prompt (case-sensitive, so prose mentioning "pin:" is left alone).
+// parsePin recognises PIN:, PIN!:, PIN@<scope>:, CARRY:, UNPIN: and PROMOTE: at the
+// start of a prompt, after any spaces (case-sensitive, so prose mentioning "pin:"
+// is left alone).
 func parsePin(prompt string) (pinCmd, bool) {
+	prompt = strings.TrimLeft(prompt, " \t\r\n")
 	m := pinRe.FindStringSubmatch(prompt)
 	if m == nil {
 		return pinCmd{}, false

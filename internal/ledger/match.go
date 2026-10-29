@@ -135,8 +135,16 @@ func listPins(cwd, dir, here string) []located {
 	return out
 }
 
+// pinNumber reports whether q is a pin number ("1".."999"), as PINS? shows them.
+func pinNumber(q string) (int, bool) {
+	q = strings.TrimSpace(q)
+	n, err := strconv.Atoi(q)
+	return n, err == nil && len(q) <= 3 && strings.Trim(q, "0123456789") == ""
+}
+
 // resolveRef turns the shortcuts "last" (the newest pin) and "N" (the Nth pin
-// of PINS?) into that pin's id; anything else is returned unchanged.
+// of PINS?) into that pin's id; anything else is returned unchanged. A number
+// out of range is the caller's to refuse, never matched as text.
 func resolveRef(q string, pins []located) string {
 	q = strings.TrimSpace(q)
 	if strings.EqualFold(q, "last") && len(pins) > 0 {
@@ -149,7 +157,7 @@ func resolveRef(q string, pins []located) string {
 		}
 		return pins[best].ID
 	}
-	if n, err := strconv.Atoi(q); err == nil && len(q) <= 3 && n >= 1 && n <= len(pins) {
+	if n, ok := pinNumber(q); ok && n >= 1 && n <= len(pins) {
 		return pins[n-1].ID
 	}
 	return q
@@ -230,13 +238,13 @@ func PinsList(pins []located) string {
 	return b.String()
 }
 
-// setLife rewrites the life of pin id in path, under the lock.
-func setLife(path, id, life string) error {
+// setLife gives pin p (same id and lifetime) in path the lifetime life, under the lock.
+func setLife(path string, pin Pin, life string) error {
 	return withLock(path, func() error {
 		var out []string
 		for _, l := range readLines(path) {
 			var p Pin
-			if json.Unmarshal([]byte(l), &p) == nil && p.ID == id {
+			if json.Unmarshal([]byte(l), &p) == nil && p.ID == pin.ID && p.Life == pin.Life {
 				p.Life = life
 				l = string(Marshal(p))
 			}

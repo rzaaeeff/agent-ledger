@@ -189,7 +189,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			case sameStore && normText(p.Text) == normText(cmd.text):
 				msg := fmt.Sprintf("already pinned [%s]", p.ID)
 				if life == LifeKeep && p.Life == "" {
-					if err := setLife(file, p.ID, LifeKeep); err != nil {
+					if err := setLife(file, p.Pin, LifeKeep); err != nil {
 						LogError(dir, "pin upgrade failed")
 						emit(out, fmt.Sprintf("already pinned [%s]; could NOT make it survive /clear (see %s).", p.ID, filepath.Join(dir, ErrorsFile)))
 						return
@@ -221,6 +221,10 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			return
 		}
 		all := listPins(h.Cwd, dir, here)
+		if n, ok := pinNumber(cmd.text); ok && (n < 1 || n > len(all)) {
+			emit(out, fmt.Sprintf("%s did nothing: there is no pin %d (there are %d). Send PINS? to list them.", cmd.verb, n, len(all)))
+			return
+		}
 		hits := matching(resolveRef(cmd.text, all), all)
 		if len(hits) != 1 {
 			msg := fmt.Sprintf("%s did nothing: no pin matches %q.", cmd.verb, cmd.text)
@@ -241,7 +245,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		}
 		p, from := hits[0].Pin, hits[0].File
 		if cmd.verb == "UNPIN" {
-			switch ok, err := Unpin(from, p.ID); {
+			switch ok, err := Unpin(from, p); {
 			case err != nil:
 				LogError(dir, "unpin failed")
 				emit(out, "UNPIN failed, see "+filepath.Join(dir, ErrorsFile))
@@ -262,12 +266,16 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			emit(out, "PROMOTE failed: "+err.Error())
 			return
 		}
-		if _, err := Unpin(from, p.ID); err != nil {
+		unpinned := "unpinned it"
+		if ok, err := Unpin(from, p); err != nil {
 			LogError(dir, "promote: unpin failed")
+			unpinned = "could NOT unpin it (see " + filepath.Join(dir, ErrorsFile) + ")"
+		} else if !ok {
+			unpinned = "it was already unpinned"
 		}
-		msg := fmt.Sprintf("promoted [%s] to %s and unpinned it. Not committed: review with git diff.", p.ID, filepath.Base(target))
+		msg := fmt.Sprintf("promoted [%s] to %s; %s. Not committed: review with git diff.", p.ID, filepath.Base(target), unpinned)
 		if !added {
-			msg = fmt.Sprintf("[%s] was already in %s; unpinned it.", p.ID, filepath.Base(target))
+			msg = fmt.Sprintf("[%s] was already in %s; %s.", p.ID, filepath.Base(target), unpinned)
 		}
 		emit(out, msg+" "+Status(dir))
 	}

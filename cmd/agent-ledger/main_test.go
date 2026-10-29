@@ -1249,3 +1249,49 @@ func TestForgivingPins(t *testing.T) {
 		t.Errorf("loose PROMOTE: %q", msg)
 	}
 }
+
+func TestForgivingPinsReviewFixes(t *testing.T) {
+	e := setup(t)
+	d := e.dir("s1")
+	f := filepath.Join(d, "pinned.jsonl")
+
+	// An out-of-range number is refused, never matched as text ("node 17" has a 7).
+	e.say("PIN: use node 17", "s1")
+	if msg := sysMsg(t, e.say("UNPIN: 7", "s1")); !strings.Contains(msg, "no pin 7") {
+		t.Errorf("UNPIN: 7 with one pin = %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PROMOTE: 0", "s1")); !strings.Contains(msg, "no pin 0") {
+		t.Errorf("PROMOTE: 0 = %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 1 {
+		t.Errorf("out-of-range number removed a pin: %d left", n)
+	}
+
+	// Leading spaces before a command are fine; prose mentioning pin: is not a command.
+	if msg := sysMsg(t, e.say("  \n PIN: indented rule", "s1")); !strings.Contains(msg, "pinned [") {
+		t.Errorf("indented PIN: %q", msg)
+	}
+	if out := e.say("this prompt mentions pin: and PIN: in passing", "s1"); out != "" {
+		t.Errorf("prose treated as a command: %q", out)
+	}
+
+	// Legacy ledger: a PIN and a CARRY of one text under one id. UNPIN and the
+	// PIN! upgrade touch only the PIN.
+	legacy := `{"id":"abc123","ts":"2026-01-01T00:00:00Z","text":"same text"}` + "\n" +
+		`{"id":"abc123","ts":"2026-01-01T00:00:01Z","text":"same text","life":"carry"}` + "\n"
+	if err := os.WriteFile(f, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if msg := sysMsg(t, e.say("PIN!: same text", "s1")); !strings.Contains(msg, "now survives /clear") {
+		t.Errorf("legacy upgrade: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, f), ","); got != "same text|keep,same text|carry" {
+		t.Errorf("legacy upgrade touched the CARRY: %s", got)
+	}
+	if msg := sysMsg(t, e.say("UNPIN: 1", "s1")); !strings.Contains(msg, "unpinned [abc123]") {
+		t.Errorf("legacy UNPIN: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, f), ","); got != "same text|carry" {
+		t.Errorf("legacy UNPIN removed the CARRY too: %s", got)
+	}
+}

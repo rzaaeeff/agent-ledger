@@ -156,15 +156,16 @@ func Status(dir string) string {
 		countLines(filepath.Join(dir, ErrorsFile)))
 }
 
-// Unpin removes the pin with this exact id from the pins file, under the lock,
-// so a PIN arriving meanwhile is never lost. It reports whether one was removed.
-func Unpin(path, id string) (bool, error) {
+// Unpin removes pin p (same id and lifetime: older ledgers can hold a PIN and a
+// CARRY of one text under one id) from the pins file, under the lock, so a PIN
+// arriving meanwhile is never lost. It reports whether one was removed.
+func Unpin(path string, pin Pin) (bool, error) {
 	found := false
 	err := withLock(path, func() error {
 		var keep []string
 		for _, l := range readLines(path) {
 			var p Pin
-			if json.Unmarshal([]byte(l), &p) == nil && p.ID == id {
+			if json.Unmarshal([]byte(l), &p) == nil && p.ID == pin.ID && p.Life == pin.Life {
 				found = true
 				continue
 			}

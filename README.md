@@ -60,7 +60,7 @@ Start a prompt with one of these:
 | `UNPIN: <number, id, words or last>` | removes a pin | |
 | `PROMOTE: <number, id or words>` | moves a pin into `AGENTS.md` (or `CLAUDE.md` if only that exists), uncommitted | |
 
-Prefixes are case-sensitive and must start the prompt. Each pin gets a short id, shown when you pin it, in `PINS?` and in the re-injected list.
+Prefixes are case-sensitive and must start the prompt (spaces before them are fine); "pin:" in the middle of a sentence is ignored. Each pin gets a short id, shown when you pin it, in `PINS?` and in the re-injected list.
 
 You don't have to remember a pin's exact wording:
 
