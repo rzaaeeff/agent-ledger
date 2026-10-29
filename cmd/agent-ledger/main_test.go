@@ -140,8 +140,11 @@ func lastField(t *testing.T, path, field string) string {
 func sysMsg(t *testing.T, out string) string {
 	t.Helper()
 	var v map[string]string
+	if err := json.Unmarshal([]byte(out), &v); err == nil && len(v) == 2 && v["decision"] == "block" && v["reason"] != "" {
+		return v["reason"]
+	}
 	if err := json.Unmarshal([]byte(out), &v); err != nil || len(v) != 1 {
-		t.Fatalf("want exactly one {systemMessage} JSON, got %q", out)
+		t.Fatalf("want exactly one {systemMessage} or block JSON, got %q", out)
 	}
 	msg, ok := v["systemMessage"]
 	if !ok {
@@ -416,8 +419,72 @@ func TestSizeCap(t *testing.T) {
 	}
 	e.say("PIN: "+strings.Repeat("p", 9000), "s1")
 	out = e.inject("compact", "s1")
-	if !strings.Contains(out, "WARNING: pinned items exceed") || !strings.Contains(out, strings.Repeat("p", 9000)) || !strings.Contains(out, "never commit to main") {
-		t.Error("pins over 2k tokens must be kept whole with a warning")
+	warn := strings.Index(out, "WARNING: 1 pinned item(s) did not fit")
+	if warn < 0 || warn > strings.Index(out, "never commit to main") || strings.Contains(out, strings.Repeat("p", 100)) || len(out) > 9500 {
+		t.Errorf("a pin over the limit must be cut with a warning first, under 9500 bytes (%d):\n%.400s", len(out), out)
+	}
+	// Non-ASCII: the cap is in bytes (Codex counts bytes/4 as tokens).
+	f := setup(t)
+	for i := 0; i < 40; i++ {
+		f.say(fmt.Sprintf("PIN: %d %s", i, strings.Repeat("ж", 150)), "s1")
+	}
+	if out := f.inject("compact", "s1"); len(out) > 9500 || !strings.Contains(out, "did not fit") {
+		t.Errorf("non-ASCII pins: %d bytes", len(out))
+	}
+}
+
+func TestCommandsBlockAndCount(t *testing.T) {
+	e := setup(t)
+	isBlock := func(out string) bool { return strings.Contains(out, `"decision":"block"`) }
+	if out := e.say("PIN: keep it short", "s1"); isBlock(out) {
+		t.Errorf("PIN must let the prompt through: %s", out)
+	}
+	for _, p := range []string{"UNPIN: nothing like this", "PROMOTE: 9", "PIN [zz9]: x"} {
+		if out := e.say(p, "s1"); !isBlock(out) && p != "PIN [zz9]: x" {
+			t.Errorf("%s must block: %s", p, out)
+		}
+	}
+	if !strings.Contains(e.say("CARRY: next step", "s1"), "1 CARRY waiting") {
+		t.Error("CARRY must be counted apart")
+	}
+	e.say("tell me about it", "s1")
+	out := e.inject("compact", "s1")
+	if strings.Contains(out, "UNPIN: nothing") || strings.Contains(out, "PIN: keep") || !strings.Contains(out, "tell me about it") {
+		t.Errorf("commands must not come back as last prompts:\n%s", out)
+	}
+	// An unknown [ref] is part of a new pin, not a reword.
+	if msg := sysMsg(t, e.say("PIN [WIP]: auth refactor", "s1")); !strings.Contains(msg, "pinned") {
+		t.Errorf("PIN [WIP]: %s", msg)
+	}
+	if !strings.Contains(e.inject("compact", "s1"), "[WIP] auth refactor") {
+		t.Error("[WIP] pin text")
+	}
+	// Words match whole: "all" is not in "called"; short refs match only ids.
+	e.say("PIN@repo: the thing called foo", "s2")
+	for _, p := range []string{"UNPIN: all", "UNPIN: ll", "PROMOTE: ll"} {
+		if msg := sysMsg(t, e.say(p, "s1")); !strings.Contains(msg, "did nothing") {
+			t.Errorf("%s: %s", p, msg)
+		}
+	}
+	if msg := sysMsg(t, e.say("UNPIN: calls", "s1")); !strings.Contains(msg, "did nothing") {
+		t.Errorf("calls: %s", msg)
+	}
+	// Parser: first line only, ! after the scope, full-width colon, space before @.
+	e.say("PIN: line one\nnow do the work", "s3")
+	e.say("PIN@repo!: bang after scope", "s3")
+	e.say("PIN：fullwidth", "s3")
+	e.say("PIN @repo: spaced scope", "s3")
+	out = e.inject("compact", "s3")
+	for _, want := range []string{"] line one\n", "bang after scope", "fullwidth", "spaced scope"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "] line one now") || strings.Contains(out, "now do the work\n###") {
+		t.Errorf("multi-line PIN pinned more than its first line:\n%s", out)
+	}
+	if !strings.Contains(sysMsg(t, e.say("pin: numpy is broken", "s3")), "UNPIN: last") {
+		t.Error("lower-case pin must offer an undo")
 	}
 }
 
@@ -599,12 +666,12 @@ func TestConfigLayers(t *testing.T) {
 	repoFile := filepath.Join(e.repo, ".agent-ledger.json")
 
 	c := ledger.LoadConfig(e.repo)
-	if c.Key != "session" || c.Clear != "drop" || c.PruneDays != 30 || c.RecentPrompts != 5 || c.Decisions != 10 || c.BudgetChars != 9000 || len(c.Problems) != 0 {
+	if c.Key != "session" || c.Clear != "drop" || c.PruneDays != 30 || c.RecentPrompts != 5 || c.Decisions != 10 || c.BudgetBytes != 9000 || len(c.Problems) != 0 {
 		t.Fatalf("defaults changed: %+v", c)
 	}
 
 	writeFile(t, userFile, `{"key":"branch","recent_prompts":3,"prune_days":7}`)
-	writeFile(t, repoFile, `{"recent_prompts":2,"bogus":1,"decisions":"x","budget_chars":5}`)
+	writeFile(t, repoFile, `{"recent_prompts":2,"bogus":1,"decisions":"x","budget_bytes":5}`)
 	t.Setenv("AGENT_LEDGER_PRUNE_DAYS", "0")
 	c = ledger.LoadConfig(e.repo)
 	if c.Key != "branch" || c.Source["key"] != userFile {
@@ -619,7 +686,7 @@ func TestConfigLayers(t *testing.T) {
 	if c.Clear != "keep" {
 		t.Errorf("clear must default to keep for a shared ledger, got %s", c.Clear)
 	}
-	if c.Decisions != 10 || c.BudgetChars != 9000 || len(c.Problems) != 3 {
+	if c.Decisions != 10 || c.BudgetBytes != 9000 || len(c.Problems) != 3 {
 		t.Errorf("bad values must be ignored and reported: %+v %q", c, c.Problems)
 	}
 	out, _, rc := cli(nil, "config")
@@ -1051,12 +1118,13 @@ func TestPromote(t *testing.T) {
 	}
 
 	// AGENTS.md with the section in the middle: the rule lands at the section's end.
+	os.Remove(filepath.Join(e.repo, "CLAUDE.md"))
 	writeFile(t, agents, "# A\n\n## Pinned rules (promoted from agent-ledger)\n\n- one\n\n## Later\n\ntext\n")
 	e.say("PIN@repo: two\nlines", "s1")
 	if msg := sysMsg(t, e.say("PROMOTE: two", "s1")); !strings.Contains(msg, "AGENTS.md") {
 		t.Errorf("promote scoped pin: %q", msg)
 	}
-	if got := read(agents); got != "# A\n\n## Pinned rules (promoted from agent-ledger)\n\n- one\n- two lines\n\n## Later\n\ntext\n" {
+	if got := read(agents); got != "# A\n\n## Pinned rules (promoted from agent-ledger)\n\n- one\n- two\n\n## Later\n\ntext\n" {
 		t.Errorf("AGENTS.md:\n%s", got)
 	}
 	e.say("PIN: one", "s1")
@@ -1398,8 +1466,13 @@ func TestPinUX(t *testing.T) {
 		t.Errorf("after refused reword: %s", got)
 	}
 	e.say("UNPIN: other rule", "s1")
-	if msg := sysMsg(t, e.say("PIN [nothing like it]: x", "s1")); !strings.Contains(msg, "Send PIN [<id>]: <new text>") {
+	// A [ref] that matches no pin is part of a new pin's text.
+	if msg := sysMsg(t, e.say("PIN [nothing like it]: x", "s1")); !strings.Contains(msg, "pinned") {
 		t.Errorf("reword miss: %q", msg)
+	}
+	e.say("UNPIN: last", "s1")
+	if msg := sysMsg(t, e.say("PIN [9]: x", "s1")); !strings.Contains(msg, "there is no pin 9") {
+		t.Errorf("reword of a missing number: %q", msg)
 	}
 	if msg := sysMsg(t, e.say("PIN! [1]: x", "s1")); !strings.Contains(msg, "To reword a pin") {
 		t.Errorf("PIN! [ref]: %q", msg)

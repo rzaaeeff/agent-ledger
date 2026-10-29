@@ -35,7 +35,7 @@ type Config struct {
 	PruneDays     int    `json:"prune_days"`     // idle days before a ledger is deleted; 0 = never
 	RecentPrompts int    `json:"recent_prompts"` // prompts re-injected after compact
 	Decisions     int    `json:"decisions"`      // decisions re-injected after compact
-	BudgetChars   int    `json:"budget_chars"`   // injection budget (pins are never cut)
+	BudgetBytes   int    `json:"budget_bytes"`   // injection budget in UTF-8 bytes, at most MaxBudget
 	Logging       string `json:"logging"`        // all | pins-only | off: which prompts are logged
 	Redact        string `json:"redact"`         // on | off: mask secrets before storing
 	PromoteTo     string `json:"promote_to"`     // file PROMOTE: appends to; "" = AGENTS.md, else CLAUDE.md
@@ -63,7 +63,7 @@ func (c *Config) fields() []field {
 		{name: "prune_days", num: &c.PruneDays, minimum: 0, maxi: 36500},
 		{name: "recent_prompts", num: &c.RecentPrompts, minimum: 0, maxi: 100},
 		{name: "decisions", num: &c.Decisions, minimum: 0, maxi: 200},
-		{name: "budget_chars", num: &c.BudgetChars, minimum: 1000, maxi: 400000},
+		{name: "budget_bytes", num: &c.BudgetBytes, minimum: 1000, maxi: MaxBudget},
 		{name: "logging", str: &c.Logging, allowed: []string{"all", "pins-only", "off"}},
 		{name: "redact", str: &c.Redact, allowed: []string{"on", "off"}},
 		{name: "promote_to", str: &c.PromoteTo, pattern: promoteRe},
@@ -73,7 +73,7 @@ func (c *Config) fields() []field {
 // DefaultConfig is today's behaviour.
 func DefaultConfig() Config {
 	c := Config{Key: KeySession, PruneDays: PruneDays, RecentPrompts: RecentPrompts,
-		Decisions: RecentDecs, BudgetChars: Budget, Logging: "all", Redact: "on", Source: map[string]string{}}
+		Decisions: RecentDecs, BudgetBytes: Budget, Logging: "all", Redact: "on", Source: map[string]string{}}
 	for _, f := range c.fields() {
 		c.Source[f.name] = "default"
 	}

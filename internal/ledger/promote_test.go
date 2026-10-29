@@ -64,3 +64,39 @@ func TestAddRuleReviewFixes(t *testing.T) {
 		}
 	}
 }
+
+func TestPromoteTarget(t *testing.T) {
+	t.Setenv("CODEX_THREAD_ID", "")
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+	d := t.TempDir()
+	if _, err := git(d, "init", "-q"); err != nil {
+		t.Skip("git unavailable")
+	}
+	top, _ := git(d, "rev-parse", "--show-toplevel")
+	want := func(name string) {
+		t.Helper()
+		got, err := PromoteTarget(Config{}, d)
+		if err != nil || filepath.Base(got) != name {
+			t.Errorf("got %s %v, want %s", got, err, name)
+		}
+	}
+	a, c := filepath.Join(top, "AGENTS.md"), filepath.Join(top, "CLAUDE.md")
+	want("AGENTS.md")
+	os.WriteFile(c, []byte("# x\n"), 0o600)
+	want("CLAUDE.md")
+	os.WriteFile(a, []byte("# y\n"), 0o600)
+	want("CLAUDE.md") // Claude Code reads only CLAUDE.md when both exist
+	t.Setenv("CODEX_THREAD_ID", "t1")
+	want("AGENTS.md")
+	t.Setenv("CODEX_THREAD_ID", "")
+	os.WriteFile(c, []byte("# x\nSee @AGENTS.md\n"), 0o600)
+	want("AGENTS.md")
+	os.Remove(c)
+	if runtime.GOOS != "windows" {
+		os.Symlink("AGENTS.md", c)
+		want("AGENTS.md")
+	}
+	if got, _ := PromoteTarget(Config{PromoteTo: "RULES.md"}, d); filepath.Base(got) != "RULES.md" {
+		t.Errorf("promote_to: %s", got)
+	}
+}
