@@ -71,7 +71,7 @@ Measured on a 2-core cloud VM, 30 pins and 200 prompts logged, 100 runs each: `u
 Layers, later wins: defaults < user `~/.config/agent-ledger/config.json` (`%APPDATA%` on Windows) < repo `.agent-ledger.json` (commit it to share with the team) < env `AGENT_LEDGER_<KEY>`.
 
 ```json
-{ "key": "session", "clear": "drop", "prune_days": 30, "recent_prompts": 5, "decisions": 10, "budget_chars": 16000,
+{ "key": "session", "clear": "drop", "prune_days": 30, "recent_prompts": 5, "decisions": 10, "budget_chars": 9000,
   "logging": "all", "redact": "on" }
 ```
 
@@ -81,7 +81,7 @@ Layers, later wins: defaults < user `~/.config/agent-ledger/config.json` (`%APPD
 | `clear` | `drop`, `keep` | On `/clear`: drop pins and show them, or re-inject pins and decisions. Default `drop` for `session`, `keep` otherwise |
 | `prune_days` | 0-36500 | Delete ledgers idle this long at startup; 0 = never |
 | `recent_prompts`, `decisions` | 0-100, 0-200 | How many are re-injected after compact |
-| `budget_chars` | 1000-400000 | Injection budget; pins are never cut |
+| `budget_chars` | 1000-400000 | Injection budget (default 9000, under the ~10k-char hook-context caps of Claude Code and Codex). Prompts, then decisions are dropped to fit; long decisions are cut. Pins are never cut; you get a warning when they alone exceed it |
 | `logging` | `all` (default), `pins-only`, `off` | Which prompts are stored; pins are always kept |
 | `redact` | `on` (default), `off` | Mask API keys, tokens, private keys, JWTs, URL passwords and `password=`-style values before storing |
 | `promote_to` | a file name like `RULES.md` | Target of `PROMOTE:` (top of the work tree; no paths) |
@@ -95,7 +95,9 @@ Bad files, unknown keys and invalid values are ignored; `agent-ledger config` sh
 With `key: session` (default):
 
 1. The hook's `session_id` (hooks), else `CLAUDE_SESSION_ID` (written to `CLAUDE_ENV_FILE` at session start), else `CLAUDE_CODE_SESSION_ID`, else Codex's `CODEX_THREAD_ID`.
-2. With no session id, the current git branch (`detached` for detached HEAD), so manual runs and other CLIs still work.
+2. With no session id, the current git branch (`detached` for detached HEAD), so manual runs and other CLIs still work. Branch ledgers are named `@b-<branch>-<hash>`, so `feat/x` and `feat_x` stay apart.
+
+After `/clear` with a new session id, the pins are handed over only when exactly one chat in this folder was cleared in the last 10 minutes; otherwise you are told, and nothing is guessed.
 
 Set `AGENT_LEDGER_DEBUG=1` to log every hook's input to `hooks.debug.log` in the repo ledger dir.
 
@@ -108,3 +110,7 @@ scripts/release.sh   # all 6 targets + checksums.txt into dist/
 ```
 
 Releases: bump `VERSION` and `.claude-plugin/plugin.json`, then push tag `v<VERSION>`; `release.yml` builds and uploads.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

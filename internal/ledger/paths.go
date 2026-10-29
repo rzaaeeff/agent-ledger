@@ -99,6 +99,18 @@ func SessionFromEnv() string {
 	return ""
 }
 
+// SessionKey is the dir name of session sid's ledger: the id itself when it is
+// already safe (UUIDs are), else the sanitised id plus a hash of the raw one, so
+// two ids never share a dir.
+func SessionKey(sid string) string {
+	key := Safe(sid, 100, true)
+	if key == sid {
+		return key
+	}
+	sum := sha1.Sum([]byte(sid))
+	return "id-" + Safe(key, 88, true) + "-" + hex.EncodeToString(sum[:])[:6]
+}
+
 // Dir is the ledger for cwd and session sid under the config of cwd; see DirFor.
 func Dir(cwd, sid string) (string, error) {
 	if cwd == "" {
@@ -132,16 +144,12 @@ func DirFor(cfg Config, cwd, sid string) (string, error) {
 			sid = SessionFromEnv()
 		}
 	}
-	key := sid
-	if key == "" {
-		key, _ = git(cwd, "branch", "--show-current")
-		if key == "" {
-			key = "detached"
+	if sid == "" {
+		b, _ := git(cwd, "branch", "--show-current")
+		if b == "" {
+			b = "detached"
 		}
+		return filepath.Join(root, BranchLedgerKey(b)), nil
 	}
-	key = Safe(key, 100, true)
-	if key == "" {
-		key = "unnamed"
-	}
-	return filepath.Join(root, key), nil
+	return filepath.Join(root, SessionKey(sid)), nil
 }

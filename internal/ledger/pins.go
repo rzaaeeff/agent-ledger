@@ -68,6 +68,14 @@ func branchKey(b string) string {
 	return "@branch-" + Safe(b, 80, true) + "-" + hex.EncodeToString(sum[:])[:6]
 }
 
+// BranchLedgerKey is the dir of a branch-keyed ledger (key=branch, or no session
+// id): "@b-" keeps it apart from session ids (Safe never produces "@") and from
+// PIN@branch stores; the hash keeps feat/x and feat_x apart. Idle-pruned as usual.
+func BranchLedgerKey(b string) string {
+	sum := sha1.Sum([]byte(b))
+	return "@b-" + Safe(b, 80, true) + "-" + hex.EncodeToString(sum[:])[:6]
+}
+
 // BranchNameFile in a @branch-* store holds the raw branch name, so Prune can
 // tell whether the branch still exists.
 const BranchNameFile = "branch"

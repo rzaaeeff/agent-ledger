@@ -241,12 +241,12 @@ func TestKeyedBySession(t *testing.T) {
 	t.Setenv("CODEX_THREAD_ID", "")
 
 	e.say("hostile", "../../../x;$(touch pwned)/..")
-	if !exists(filepath.Join(e.root, "_.._.._x___touch_pwned__..", "prompts.jsonl")) {
+	if !exists(filepath.Join(e.root, ledger.SessionKey("../../../x;$(touch pwned)/.."), "prompts.jsonl")) {
 		t.Error("hostile session id not sanitised into one directory")
 	}
 	for _, evil := range []string{"..", ".", "..."} {
 		e.say("dots "+evil, evil)
-		if got := lastField(t, filepath.Join(e.root, "unnamed", "prompts.jsonl"), "prompt"); got != "dots "+evil {
+		if got := lastField(t, filepath.Join(e.root, ledger.SessionKey(evil), "prompts.jsonl"), "prompt"); got != "dots "+evil {
 			t.Errorf("session id %q escaped: %q", evil, got)
 		}
 	}
@@ -277,7 +277,7 @@ func TestBranchFallback(t *testing.T) {
 	e := setup(t)
 	e.checkout("-b", "feat/y;$(touch-pwned)")
 	e.say("on odd branch", "")
-	d2 := e.dir("feat_y___touch-pwned_")
+	d2 := e.dir(ledger.BranchLedgerKey("feat/y;$(touch-pwned)"))
 	if !exists(filepath.Join(d2, "prompts.jsonl")) {
 		t.Error("no session id: branch ledger not used / not sanitised")
 	}
@@ -287,7 +287,7 @@ func TestBranchFallback(t *testing.T) {
 	}
 	e.checkout("--detach")
 	e.say("detached", "")
-	if !exists(filepath.Join(e.root, "detached", "prompts.jsonl")) {
+	if !exists(filepath.Join(e.root, ledger.BranchLedgerKey("detached"), "prompts.jsonl")) {
 		t.Error("detached HEAD has no ledger of its own")
 	}
 	e.checkout("main")
@@ -570,7 +570,7 @@ func TestConfigLayers(t *testing.T) {
 	repoFile := filepath.Join(e.repo, ".agent-ledger.json")
 
 	c := ledger.LoadConfig(e.repo)
-	if c.Key != "session" || c.Clear != "drop" || c.PruneDays != 30 || c.RecentPrompts != 5 || c.Decisions != 10 || c.BudgetChars != 16000 || len(c.Problems) != 0 {
+	if c.Key != "session" || c.Clear != "drop" || c.PruneDays != 30 || c.RecentPrompts != 5 || c.Decisions != 10 || c.BudgetChars != 9000 || len(c.Problems) != 0 {
 		t.Fatalf("defaults changed: %+v", c)
 	}
 
@@ -590,7 +590,7 @@ func TestConfigLayers(t *testing.T) {
 	if c.Clear != "keep" {
 		t.Errorf("clear must default to keep for a shared ledger, got %s", c.Clear)
 	}
-	if c.Decisions != 10 || c.BudgetChars != 16000 || len(c.Problems) != 3 {
+	if c.Decisions != 10 || c.BudgetChars != 9000 || len(c.Problems) != 3 {
 		t.Errorf("bad values must be ignored and reported: %+v %q", c, c.Problems)
 	}
 	out, _, rc := cli(nil, "config")
@@ -636,7 +636,7 @@ func TestKeyModes(t *testing.T) {
 	e := setup(t)
 	t.Setenv("AGENT_LEDGER_KEY", "branch")
 	e.say("PIN: branch rule", "s1")
-	if !exists(filepath.Join(e.dir("main"), "pinned.jsonl")) {
+	if !exists(filepath.Join(e.dir(ledger.BranchLedgerKey("main")), "pinned.jsonl")) {
 		t.Fatal("key=branch must use the branch ledger even with a session id")
 	}
 	if out := e.inject("startup", "s2"); !strings.Contains(out, "branch rule") {
@@ -1057,5 +1057,65 @@ func TestPromote(t *testing.T) {
 		if out := e.inject("compact", "s1"); !strings.Contains(out, "alpha x") {
 			t.Error("a failed promote must keep the pin")
 		}
+	}
+}
+
+// Regressions from the pre-launch review.
+func TestLaunchFixes(t *testing.T) {
+	e := setup(t)
+
+	// Writes that fail must not report success.
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	os.WriteFile(blocked, []byte("x"), 0o600)
+	state := os.Getenv("XDG_STATE_HOME")
+	t.Setenv("XDG_STATE_HOME", blocked)
+	if out, _, rc := cli(nil, "decide", "a", "b", "c"); rc != 1 || strings.Contains(out, "recorded") {
+		t.Errorf("decide on an unwritable store: rc=%d out=%q", rc, out)
+	}
+	if msg := sysMsg(t, e.say("PIN: lost", "w1")); !strings.Contains(msg, "NOT SAVED") || strings.Contains(msg, "pinned [") {
+		t.Errorf("PIN on an unwritable store = %q", msg)
+	}
+	t.Setenv("XDG_STATE_HOME", state)
+
+	// Two chats cleared in one folder: a new id takes neither one's pins.
+	for _, s := range []string{"A", "B"} {
+		e.say("PIN!: only-"+s, s)
+		cli(e.end("clear", s), "hook", "session-end")
+	}
+	out := e.inject("clear", "new-A")
+	if strings.Contains(out, "only-A") || strings.Contains(out, "only-B") || !strings.Contains(out, "can't tell") {
+		t.Errorf("ambiguous /clear handoff:\n%s", out)
+	}
+	// One chat cleared: its new id still gets the kept pin.
+	e.say("PIN!: only-C", "C")
+	cli(e.end("clear", "C"), "hook", "session-end")
+	os.Remove(filepath.Join(e.root, ".cleared.jsonl"))
+	e.say("PIN!: only-C", "C")
+	cli(e.end("clear", "C"), "hook", "session-end")
+	if out := e.inject("clear", "new-C"); !strings.Contains(out, "only-C") {
+		t.Errorf("single /clear handoff lost the kept pin:\n%s", out)
+	}
+
+	// Branch names that sanitise alike keep separate ledgers.
+	t.Setenv("AGENT_LEDGER_KEY", "branch")
+	e.checkout("-b", "feat/x")
+	e.say("PIN: slash rule", "")
+	e.checkout("-b", "feat_x")
+	if out, _, _ := cli(nil, "inject"); strings.Contains(out, "slash rule") {
+		t.Errorf("feat_x sees feat/x's ledger:\n%s", out)
+	}
+	t.Setenv("AGENT_LEDGER_KEY", "")
+	e.checkout("main")
+
+	// The budget holds even for one huge decision.
+	t.Setenv("CLAUDE_SESSION_ID", "big")
+	cli(nil, "decide", strings.Repeat("d", 15000), "b", "-")
+	t.Setenv("AGENT_LEDGER_BUDGET_CHARS", "1000")
+	if out, _, _ := cli(nil, "inject"); len([]rune(out)) > 1500 {
+		t.Errorf("budget 1000 printed %d chars", len([]rune(out)))
+	}
+	t.Setenv("AGENT_LEDGER_BUDGET_CHARS", "")
+	if out, _, _ := cli(nil, "inject"); !strings.Contains(out, "[cut; full text in decisions.jsonl]") || len(out) > 9000+400 {
+		t.Errorf("default budget: %d chars, cut marker missing", len(out))
 	}
 }
