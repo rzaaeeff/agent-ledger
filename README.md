@@ -8,7 +8,7 @@ agent-ledger keeps the lines you mark and puts them back after every compaction.
 PIN: don't touch the migrations, the schema is frozen until Friday
 ```
 
-After `/compact`, the agent sees that pin again, word for word, along with up to your last 5 prompts and its last 10 recorded decisions (fewer if they don't fit the size limit).
+After `/compact`, the agent sees that pin again, word for word, along with up to your last 5 prompts and its last 10 recorded decisions (fewer if they don't fit the size limit). You get a one-line note saying what was restored.
 
 **Status: v0.1, early.** The hooks are covered by tests that feed them the JSON Claude Code and Codex send. They have not yet been run in a live Claude Code or Codex session. Please report what breaks.
 
@@ -42,11 +42,11 @@ then install `agent-ledger` from `/plugins` and approve its hooks.
 
 On first use the plugin downloads one binary (about 3.5 MB) for your OS from the GitHub release and checks its SHA-256. The download runs in the background, so hooks start working a few seconds after first use; anything before that is not recorded. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere the hooks do nothing).
 
-The hooks never block your prompt. If the download fails, the reason goes to `~/.local/state/agent-ledger/skips.log`. If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
+The hooks never block your prompt (`PINS?` and `LEDGER?` are the exceptions, on purpose). If the download fails, the reason goes to `~/.local/state/agent-ledger/skips.log`. If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 
 ## Using it
 
-Start a prompt with one of these:
+Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 
 | Prefix | Who sees it | After `/clear` |
 |---|---|---|
@@ -56,10 +56,19 @@ Start a prompt with one of these:
 | `PIN@branch:` | every chat on this branch (refused on `main`, `master`, the default branch and a detached HEAD) | kept |
 | `PIN@repo:` | every chat in this repo | kept |
 | `PIN@global:` | every chat in every repo | kept |
-| `UNPIN: <id or text>` | removes a pin | |
-| `PROMOTE: <id or text>` | moves a pin into `AGENTS.md` (or `CLAUDE.md` if only that exists), uncommitted | |
+| `PINS?` | lists your pins with numbers; only you see it, the agent gets nothing | |
+| `LEDGER?` | the cheat sheet and what's stored; only you see it | |
+| `PIN [ref]: <new text>` | rewords a pin; it keeps its scope and lifetime | |
+| `UNPIN: <ref>` | removes a pin | |
+| `PROMOTE: <ref>` | moves a pin into `AGENTS.md` (or `CLAUDE.md` if only that exists), uncommitted | |
 
-Prefixes are case-sensitive and must start the prompt. `UNPIN:` and `PROMOTE:` act only if exactly one pin matches. Each pin gets a short id, shown when you pin it and in the re-injected list.
+A `<ref>` is a number from `PINS?`, a pin's id, `last`, or words from the pin. Prefixes work in any case (`pin:` = `PIN:`) but only at the start of the prompt; "pin:" in the middle of a sentence is ignored. Near misses like `PIN; x` or `PIN x` save nothing and tell you so (the prompt still goes to the agent).
+
+You don't have to remember a pin's exact wording:
+
+- `UNPIN: friday migrations` finds "Don't touch the migrations until Friday": case, punctuation and word order don't matter. `UNPIN: last` takes the newest pin, `UNPIN: 2` the second one in `PINS?`.
+- If nothing or more than one pin matches, nothing is removed and you get the closest pins with their ids.
+- Pinning the same text again does nothing (`PIN!:` on a `PIN:` makes it survive `/clear`). Pinning something close to an existing pin saves it and names the old one, so you can `UNPIN` it if the new one replaces it. The tool never decides that for you.
 
 Decisions: the plugin ships a `record-decision` skill. When you and the agent settle something, it runs `agent-ledger decide "<decision>" "<because>" "<rejected>"`, and the decision comes back after compaction, so you don't rehash rejected options.
 

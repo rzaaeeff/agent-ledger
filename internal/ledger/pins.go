@@ -37,6 +37,7 @@ type Scope struct {
 	Name  string // branch | repo | global
 	Label string // section title in the injected context
 	Dir   string
+	Short string // where a pin lives, in PINS? and UNPIN replies
 }
 
 // PinScopes lists the branch, repo and global pin stores for cwd, skipping any
@@ -45,11 +46,11 @@ func PinScopes(cwd, dir string) []Scope {
 	var out []Scope
 	root := filepath.Dir(dir)
 	if b, _ := git(cwd, "branch", "--show-current"); b != "" {
-		out = append(out, Scope{ScopeBranch, "Pinned for branch " + b + " (all sessions)", filepath.Join(root, branchKey(b))})
+		out = append(out, Scope{ScopeBranch, "Pinned for branch " + b + " (all sessions)", filepath.Join(root, branchKey(b)), "branch " + b})
 	}
 	out = append(out,
-		Scope{ScopeRepo, "Pinned for this repo (all sessions and branches)", filepath.Join(root, RepoKey)},
-		Scope{ScopeGlobal, "Pinned for every repo", GlobalDir()})
+		Scope{ScopeRepo, "Pinned for this repo (all sessions and branches)", filepath.Join(root, RepoKey), "this repo"},
+		Scope{ScopeGlobal, "Pinned for every repo", GlobalDir(), "every repo"})
 	kept := out[:0]
 	for _, s := range out {
 		if filepath.Clean(s.Dir) != filepath.Clean(dir) {
@@ -112,20 +113,45 @@ func DefaultBranches(cwd string) map[string]bool {
 type pinCmd struct {
 	verb  string // PIN | CARRY | UNPIN
 	keep  bool   // PIN!
-	scope string // "" (session) | branch | repo | global
+	scope string // "" (session) | branch | repo | global, or an unknown word
+	ref   string // PIN [ref]: rewords the pin ref selects
 	text  string
 }
 
-var pinRe = regexp.MustCompile(`^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:@(branch|repo|global))?:`)
+var pinRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:@([a-z]+))?(?:\s*\[([^\]\n]*)\])?\s*:`)
 
-// parsePin recognises PIN:, PIN!:, PIN@<scope>:, CARRY: and UNPIN: at the very start
-// of a prompt (case-sensitive, so prose mentioning "pin:" is left alone).
+// Look-alikes of a command that are not one: a wrong separator ("PIN; x",
+// "pin = x"), or the keyword in capitals without the colon ("PIN x").
+var (
+	nearRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(@[a-z]+)?\s*[;=]`)
+	capsRe = regexp.MustCompile(`^(PIN|CARRY|UNPIN|PROMOTE)(!)?(@[a-z]+)?\s+\S`)
+)
+
+// nearMiss is the hint for a prompt that looks like a command but is not one, or "".
+func nearMiss(prompt string) string {
+	p := strings.TrimLeft(prompt, " \t\r\n")
+	m := nearRe.FindStringSubmatch(p)
+	if m == nil {
+		m = capsRe.FindStringSubmatch(p)
+	}
+	if m == nil {
+		return ""
+	}
+	want := strings.ToUpper(m[1]) + m[2] + strings.ToLower(m[3]) + ":"
+	return fmt.Sprintf("ledger: nothing saved; this went to the agent as a normal prompt. Commands need the colon: %s ... (LEDGER? lists them)", want)
+}
+
+// parsePin recognises PIN:, PIN!:, PIN@<scope>:, PIN [ref]:, CARRY:, UNPIN: and
+// PROMOTE: at the start of a prompt, after any spaces, in any case. Only the start
+// counts, so prose mentioning "pin:" is left alone.
 func parsePin(prompt string) (pinCmd, bool) {
+	prompt = strings.TrimLeft(prompt, " \t\r\n")
 	m := pinRe.FindStringSubmatch(prompt)
 	if m == nil {
 		return pinCmd{}, false
 	}
-	return pinCmd{verb: m[1], keep: m[2] != "", scope: m[3], text: strings.TrimSpace(prompt[len(m[0]):])}, true
+	return pinCmd{verb: strings.ToUpper(m[1]), keep: m[2] != "", scope: strings.ToLower(m[3]), ref: strings.TrimSpace(m[4]),
+		text: strings.TrimSpace(prompt[len(m[0]):])}, true
 }
 
 // pinID is sha1(text)[:6] for session pins (as before scopes existed) and
@@ -138,43 +164,6 @@ func pinID(scope, text string) string {
 	}
 	sum := sha1.Sum([]byte(key))
 	return hex.EncodeToString(sum[:])[:6]
-}
-
-// unpinFiles are the pin files UNPIN searches, current ledger first.
-func unpinFiles(cwd, dir string) []string {
-	files := []string{filepath.Join(dir, PinnedFile)}
-	for _, s := range PinScopes(cwd, dir) {
-		files = append(files, filepath.Join(s.Dir, PinnedFile))
-	}
-	return files
-}
-
-func countMatches(path, q string) int {
-	ids := map[string]bool{}
-	for _, l := range readLines(path) {
-		var p Pin
-		if json.Unmarshal([]byte(l), &p) == nil && (p.ID == q || strings.Contains(p.Text, q)) {
-			ids[p.ID] = true
-		}
-	}
-	return len(ids)
-}
-
-// UnpinAny removes the one pin matching q across the current ledger and the
-// branch, repo and global stores. It returns the total number of matching pins;
-// nothing is removed unless it is 1.
-func UnpinAny(cwd, dir, q string) (int, error) {
-	total, at := 0, ""
-	for _, f := range unpinFiles(cwd, dir) {
-		if n := countMatches(f, q); n > 0 {
-			total += n
-			at = f
-		}
-	}
-	if total != 1 {
-		return total, nil
-	}
-	return Unpin(at, q)
 }
 
 // pinLines formats pins for the injected context; tag marks lifetimes.

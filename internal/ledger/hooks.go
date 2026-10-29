@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -72,10 +73,20 @@ func debug(root, event string, h HookInput) {
 //	PIN@branch: <text> for every session on this branch (refused on the default branch)
 //	PIN@repo: <text>   for every session and branch of this repo
 //	PIN@global: <text> for every repo
-//	UNPIN: <id|text>   removes the pin with that id, or the only one containing the
-//	                   text, from any of those stores
-//	PROMOTE: <id|text> moves that pin into the repo's AGENTS.md (or CLAUDE.md, or
+//	UNPIN: <ref>       removes the one pin ref selects, from any of those stores:
+//	                   an id, its number in PINS?, "last", or words in it in any
+//	                   order (case and punctuation ignored); else lists the closest
+//	PROMOTE: <ref>     moves that pin into the repo's AGENTS.md (or CLAUDE.md, or
 //	                   promote_to), uncommitted
+//	PIN [ref]: <text>  rewords that pin; it keeps its store and lifetime
+//	PINS?              blocks the prompt; the user (not the model) sees the pins
+//	LEDGER?            the same, with a cheat sheet and the status
+//
+// Keywords match in any case, only at the start of the prompt. A look-alike
+// ("PIN; x", "PIN x") saves nothing and gets a hint; the prompt still goes on.
+//
+// The same text pinned again in the same store is not added (PIN! upgrades a
+// PIN); a pin similar to an existing one is added with a note naming it.
 //
 // Config logging=pins-only logs only these commands, logging=off logs no prompts
 // (pins are still kept); redact=on (default) masks credentials before storing.
@@ -91,6 +102,20 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if err != nil {
 		return
 	}
+	here := map[string]string{"branch": "this branch", "repo": "this repo"}[cfg.Key]
+	if here == "" {
+		here = "this chat"
+	}
+	// Blocking the prompt shows the reason to the user only: no model turn.
+	switch q := strings.TrimSpace(h.Prompt); {
+	case strings.EqualFold(q, "PINS?"):
+		fmt.Fprintf(out, "%s\n", Marshal(map[string]string{"decision": "block", "reason": PinsList(listPins(h.Cwd, dir, here))}))
+		return
+	case strings.EqualFold(q, "LEDGER?"):
+		fmt.Fprintf(out, "%s\n", Marshal(map[string]string{"decision": "block", "reason": HelpText(Status(dir))}))
+		return
+	}
+	pinsHere := func() string { return brief(len(listPins(h.Cwd, dir, here))) }
 	prompt, masked := h.Prompt, 0
 	if cfg.Redact == "on" {
 		prompt, masked = Redact(prompt)
@@ -112,10 +137,23 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if masked > 0 {
 		note = fmt.Sprintf(" (redacted %d secret(s) before storing)", masked)
 	}
-	if !ok || cmd.text == "" {
-		if masked > 0 && cfg.Logging != "off" {
+	if !ok {
+		if cfg.Logging == "off" {
+			note = ""
+		}
+		if hint := nearMiss(prompt); hint != "" {
+			emit(out, hint+note)
+		} else if note != "" {
 			emit(out, "ledger:"+note)
 		}
+		return
+	}
+	if cmd.scope != "" && cmd.scope != ScopeBranch && cmd.scope != ScopeRepo && cmd.scope != ScopeGlobal {
+		emit(out, fmt.Sprintf("ledger: nothing saved: there is no @%s. Use @branch, @repo or @global.", cmd.scope))
+		return
+	}
+	if cmd.text == "" {
+		emit(out, "ledger: nothing saved: "+cmd.verb+": needs text after the colon.")
 		return
 	}
 	if MkdirPrivate(dir) != nil {
@@ -123,6 +161,10 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		return
 	}
 	out = &suffixWriter{w: out, suffix: note}
+	if cmd.ref != "" {
+		rewordPin(h, dir, here, cmd, out)
+		return
+	}
 	switch cmd.verb {
 	case "PIN", "CARRY":
 		target, where := dir, ""
@@ -161,35 +203,66 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			_ = writeReplace(filepath.Join(target, BranchNameFile), []byte(b+"\n"))
 		}
 		id := pinID(scope, cmd.text)
-		if MkdirPrivate(target) != nil || Append(filepath.Join(target, PinnedFile), Marshal(Pin{id, ts, cmd.text, life})) != nil {
+		if life == LifeCarry {
+			// Apart from a PIN: of the same text, so UNPIN can take either.
+			id = pinID(LifeCarry, cmd.text)
+		}
+		file := filepath.Join(target, PinnedFile)
+		all := listPins(h.Cwd, dir, here)
+		var similar []located
+		for _, p := range all {
+			sameStore := filepath.Clean(p.File) == filepath.Clean(file) && (p.Life == LifeCarry) == (life == LifeCarry)
+			switch {
+			case sameStore && normText(p.Text) == normText(cmd.text):
+				msg := fmt.Sprintf("already pinned [%s]", p.ID)
+				if life == LifeKeep && p.Life == "" {
+					if err := setLife(file, p.Pin, LifeKeep); err != nil {
+						LogError(dir, "pin upgrade failed")
+						emit(out, fmt.Sprintf("already pinned [%s]; could NOT make it survive /clear (see %s).", p.ID, filepath.Join(dir, ErrorsFile)))
+						return
+					}
+					msg += "; it now survives /clear"
+				}
+				emit(out, msg+". "+pinsHere())
+				return
+			case p.ID != id && looksSimilar(p.Text, cmd.text):
+				similar = append(similar, p)
+			}
+		}
+		if MkdirPrivate(target) != nil || Append(file, Marshal(Pin{id, Now().Format(time.RFC3339Nano), cmd.text, life})) != nil {
 			LogError(dir, "pinned append failed")
-			emit(out, "PIN NOT SAVED: could not write "+filepath.Join(target, PinnedFile)+" (check permissions and disk space).")
+			emit(out, cmd.verb+" NOT SAVED: could not write "+file+" (check permissions and disk space).")
 			return
 		}
-		emit(out, fmt.Sprintf("pinned [%s]%s. %s", id, where, Status(dir)))
-	case "UNPIN":
-		text := cmd.text
-		hits, err := UnpinAny(h.Cwd, dir, text)
-		switch {
-		case err == nil && hits == 0:
-			emit(out, "UNPIN did nothing: no pins match. "+Status(dir))
-		case err != nil:
-			LogError(dir, "unpin failed")
-			emit(out, "UNPIN failed, see "+filepath.Join(dir, ErrorsFile))
-		case hits == 1:
-			emit(out, "unpinned. "+Status(dir))
-		default:
-			LogError(dir, fmt.Sprintf("UNPIN '%s' matched %d items; nothing removed", text, hits))
-			emit(out, fmt.Sprintf("UNPIN did nothing: '%s' matched %d pins (use the [id] from the pin list). %s", text, hits, Status(dir)))
+		msg := fmt.Sprintf("pinned [%s]%s.", id, where)
+		if len(similar) > 0 {
+			if len(similar) > 2 {
+				similar = similar[:2]
+			}
+			msg += " Similar: " + refList(similar) + ". Both are kept; if this one replaces it, send UNPIN: " + similar[0].ID + "."
 		}
-	case "PROMOTE":
-		if cmd.scope != "" || cmd.keep {
+		emit(out, msg+" "+pinsHere())
+	case "UNPIN", "PROMOTE":
+		if cmd.verb == "PROMOTE" && (cmd.scope != "" || cmd.keep) {
 			emit(out, "PROMOTE takes no scope or '!': PROMOTE: <id or text>.")
 			return
 		}
-		p, from, hits := findPin(h.Cwd, dir, cmd.text)
-		if hits != 1 {
-			emit(out, fmt.Sprintf("PROMOTE did nothing: '%s' matched %d pins (use the [id] from the pin list).", cmd.text, hits))
+		hit, miss := pickPin(cmd.verb, cmd.text, listPins(h.Cwd, dir, here))
+		if miss != "" {
+			emit(out, miss)
+			return
+		}
+		p, from := hit.Pin, hit.File
+		if cmd.verb == "UNPIN" {
+			switch ok, err := Unpin(from, p); {
+			case err != nil:
+				LogError(dir, "unpin failed")
+				emit(out, "UNPIN failed, see "+filepath.Join(dir, ErrorsFile))
+			case !ok:
+				emit(out, fmt.Sprintf("UNPIN did nothing: [%s] was already gone. %s", p.ID, pinsHere()))
+			default:
+				emit(out, fmt.Sprintf("unpinned [%s] %q. %s", p.ID, short(p.Text, 60), pinsHere()))
+			}
 			return
 		}
 		target, err := PromoteTarget(cfg, h.Cwd)
@@ -202,14 +275,82 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			emit(out, "PROMOTE failed: "+err.Error())
 			return
 		}
-		if _, err := Unpin(from, p.ID); err != nil {
+		unpinned := "unpinned it"
+		if ok, err := Unpin(from, p); err != nil {
 			LogError(dir, "promote: unpin failed")
+			unpinned = "could NOT unpin it (see " + filepath.Join(dir, ErrorsFile) + ")"
+		} else if !ok {
+			unpinned = "it was already unpinned"
 		}
-		msg := fmt.Sprintf("promoted [%s] to %s and unpinned it. Not committed: review with git diff.", p.ID, filepath.Base(target))
+		msg := fmt.Sprintf("promoted [%s] to %s; %s. Not committed: review with git diff.", p.ID, filepath.Base(target), unpinned)
 		if !added {
-			msg = fmt.Sprintf("[%s] was already in %s; unpinned it.", p.ID, filepath.Base(target))
+			msg = fmt.Sprintf("[%s] was already in %s; %s.", p.ID, filepath.Base(target), unpinned)
 		}
-		emit(out, msg+" "+Status(dir))
+		emit(out, msg+" "+pinsHere())
+	}
+}
+
+// pickPin is the one pin ref selects among pins, or the message for the user
+// when it selects none or several.
+func pickPin(verb, ref string, all []located) (located, string) {
+	if n, ok := pinNumber(ref); ok && (n < 1 || n > len(all)) {
+		return located{}, fmt.Sprintf("%s did nothing: there is no pin %d (there are %d). Send PINS? to list them.", verb, n, len(all))
+	}
+	hits := matching(resolveRef(ref, all), all)
+	if len(hits) == 1 {
+		return hits[0], ""
+	}
+	if len(all) == 0 {
+		return located{}, verb + " did nothing: there are no pins here."
+	}
+	msg := fmt.Sprintf("%s did nothing: no pin matches %q.", verb, ref)
+	if c := closest(ref, all, 3); len(hits) == 0 && len(c) > 0 {
+		msg += " Closest: " + refList(c) + "."
+	} else if len(hits) > 1 {
+		if len(hits) > 5 {
+			hits = hits[:5]
+		}
+		msg = fmt.Sprintf("%s did nothing: %q matches several pins: %s.", verb, ref, refList(hits))
+	}
+	return located{}, msg + fmt.Sprintf(" Send %s: <id>, or PINS? to list them.", verb)
+}
+
+// rewordPin handles PIN [ref]: <text>: the pin keeps its store and lifetime and
+// gets the id of its new text.
+func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
+	if cmd.verb != "PIN" || cmd.keep || cmd.scope != "" {
+		emit(out, "ledger: nothing saved. To reword a pin: PIN [id]: new text (it keeps its scope and lifetime).")
+		return
+	}
+	all := listPins(h.Cwd, dir, here)
+	hit, miss := pickPin("PIN [ref]", cmd.ref, all)
+	if miss != "" {
+		emit(out, strings.Replace(miss, "Send PIN [ref]: <id>", "Send PIN [<id>]: <new text>", 1))
+		return
+	}
+	if hit.Text == cmd.text {
+		emit(out, fmt.Sprintf("[%s] already says that.", hit.ID))
+		return
+	}
+	for _, o := range all {
+		if o.File == hit.File && o.ID != hit.ID && (o.Life == LifeCarry) == (hit.Life == LifeCarry) && normText(o.Text) == normText(cmd.text) {
+			emit(out, fmt.Sprintf("ledger: nothing changed: [%s] already says that. To drop the old one: UNPIN: %s", o.ID, hit.ID))
+			return
+		}
+	}
+	scope := hit.Scope
+	if hit.Life == LifeCarry {
+		scope = LifeCarry
+	}
+	p := Pin{pinID(scope, cmd.text), Now().Format(time.RFC3339Nano), cmd.text, hit.Life}
+	switch ok, err := replacePin(hit.File, hit.Pin, p); {
+	case err != nil:
+		LogError(dir, "reword failed")
+		emit(out, "PIN NOT SAVED: could not reword ["+hit.ID+"], see "+filepath.Join(dir, ErrorsFile))
+	case !ok:
+		emit(out, fmt.Sprintf("PIN NOT SAVED: [%s] was removed meanwhile.", hit.ID))
+	default:
+		emit(out, fmt.Sprintf("reworded [%s] -> [%s] (%s). %s", hit.ID, p.ID, hit.Where, brief(len(listPins(h.Cwd, dir, here)))))
 	}
 }
 
@@ -278,9 +419,21 @@ func HookSessionStart(h HookInput, out io.Writer) {
 	case "startup":
 		Prune(h.Cwd, root, dir, cfg.PruneDays)
 	}
+	text, n := compose(h.Cwd, dir, cfg)
+	msg := ""
+	if h.Source == "compact" && n != (counts{}) {
+		msg = "ledger: restored " + n.String() + " after compaction."
+	} else if n.pins > 0 {
+		msg = "ledger: " + pinsApply(n.pins) + " (PINS? lists them)."
+	}
+	if h.Source == "startup" {
+		if hint := filepath.Join(root, HintedFile); !fileExists(hint) && MkdirPrivate(root) == nil &&
+			os.WriteFile(hint, nil, 0o600) == nil {
+			msg = strings.TrimSpace(msg + " agent-ledger is on: start a prompt with PIN: to keep a rule through compaction. LEDGER? lists the commands.")
+		}
+	}
 	if h.Source == "clear" {
 		// clear=keep: no prompts, plus the CARRY handoff, once.
-		text := Compose(h.Cwd, dir, cfg)
 		c := takeCarry(dir)
 		_, statErr := os.Stat(dir)
 		if note, _ := TakeCleared(root, h.SessionID, h.Cwd, statErr != nil || cfg.Key != KeySession); note != nil {
@@ -289,13 +442,32 @@ func HookSessionStart(h HookInput, out io.Writer) {
 		if len(c) > 0 {
 			text = strings.TrimLeft(text+"\n### Carried over from before /clear (once)\n"+strings.Join(pinLines(c, false), "\n"), "\n")
 		}
+	}
+	startOutput(out, h.Source, text, msg)
+}
+
+// HintedFile in a repo's ledger root marks that the one-time hint was shown there.
+const HintedFile = "hinted"
+
+// startOutput prints SessionStart output: for a hook (with a source), JSON with
+// the context for the model and a line for the user; for a manual run, the plain
+// context only.
+func startOutput(out io.Writer, source, text, msg string) {
+	if source == "" {
 		if text != "" {
 			fmt.Fprintln(out, text)
 		}
 		return
 	}
-	if text := Compose(h.Cwd, dir, cfg); text != "" {
-		fmt.Fprintln(out, text)
+	v := map[string]any{}
+	if msg != "" {
+		v["systemMessage"] = msg
+	}
+	if text != "" {
+		v["hookSpecificOutput"] = map[string]string{"hookEventName": "SessionStart", "additionalContext": text}
+	}
+	if len(v) > 0 {
+		fmt.Fprintf(out, "%s\n", Marshal(v))
 	}
 }
 
@@ -325,6 +497,34 @@ func tail[T any](xs []T, n int) []T {
 // Compose builds the context block for the ledger in dir, within cfg.BudgetChars:
 // over it, the oldest recent prompts go first, then the oldest decisions. Never pins.
 func Compose(cwd, dir string, cfg Config) string {
+	text, _ := compose(cwd, dir, cfg)
+	return text
+}
+
+// counts is what a compose put back, for the line shown to the user.
+type counts struct{ pins, prompts, decisions int }
+
+func (c counts) String() string {
+	var parts []string
+	for _, x := range []struct {
+		n    int
+		name string
+	}{{c.pins, "pin"}, {c.prompts, "prompt"}, {c.decisions, "decision"}} {
+		if x.n == 1 {
+			parts = append(parts, "1 "+x.name)
+		} else if x.n > 1 {
+			parts = append(parts, fmt.Sprintf("%d %ss", x.n, x.name))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func compose(cwd, dir string, cfg Config) (string, counts) {
+	var n counts
+	n.pins = len(sessionPins(dir))
+	for _, s := range PinScopes(cwd, dir) {
+		n.pins += len(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)))
+	}
 	pins := strings.Join(pinLines(sessionPins(dir), true), "\n")
 	scoped := scopedSections(cwd, dir)
 	mark := readMark(dir)
@@ -352,6 +552,7 @@ func Compose(cwd, dir string, cfg Config) string {
 			dl = append(dl, fmt.Sprintf("- DECISION: %s\n  BECAUSE: %s\n  REJECTED: %s", c(x.Decision), c(x.Because), c(x.Rejected)))
 		}
 		recent, decs = strings.Join(rl, "\n"), strings.Join(dl, "\n")
+		n.prompts, n.decisions = len(rl), len(dl)
 		if runes(pins)+runes(scoped)+runes(recent)+runes(decs) <= cfg.BudgetChars {
 			break
 		}
@@ -364,7 +565,7 @@ func Compose(cwd, dir string, cfg Config) string {
 		}
 	}
 	if pins+scoped+recent+decs == "" {
-		return ""
+		return "", counts{}
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Agent ledger (re-injected after compact; full logs in %s)", dir)
@@ -383,7 +584,7 @@ func Compose(cwd, dir string, cfg Config) string {
 	if decs != "" {
 		b.WriteString("\n### Session decisions\n" + decs)
 	}
-	return b.String()
+	return b.String(), n
 }
 
 // cleared runs on SessionStart after /clear: drops this session's pins if

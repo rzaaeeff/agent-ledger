@@ -41,6 +41,10 @@ func setup(t *testing.T) *env {
 		t.Fatalf("repo ledger root %q (%v)", root, err)
 	}
 	e.root = root
+	// The one-time hint has its own test; elsewhere it would be the only output.
+	if err := os.MkdirAll(root, 0o700); err != nil || os.WriteFile(filepath.Join(root, "hinted"), nil, 0o600) != nil {
+		t.Fatal(err)
+	}
 	e.git("-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
 	t.Chdir(repo)
 	return e
@@ -84,8 +88,28 @@ func (e *env) say(text, sid string) string {
 	return out
 }
 
+// inject returns what a SessionStart puts in the model's context; output with
+// only a systemMessage (the /clear report) is returned as it is.
 func (e *env) inject(src, sid string) string {
 	out, _, _ := cli(e.start(src, sid), "hook", "session-start")
+	return contextOf(out)
+}
+
+func (e *env) injectRaw(src, sid string) string {
+	out, _, _ := cli(e.start(src, sid), "hook", "session-start")
+	return out
+}
+
+func contextOf(out string) string {
+	var v struct {
+		H *struct {
+			Event   string `json:"hookEventName"`
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if json.Unmarshal([]byte(out), &v) == nil && v.H != nil {
+		return v.H.Context + "\n"
+	}
 	return out
 }
 
@@ -167,7 +191,7 @@ func TestLoggingAndPins(t *testing.T) {
 	}
 
 	msg := sysMsg(t, e.say("PIN: never commit to main", "s1"))
-	if !regexp.MustCompile(`^pinned \[[0-9a-f]{6}\]\. ledger: 1 pins`).MatchString(msg) {
+	if !regexp.MustCompile(`^pinned \[[0-9a-f]{6}\]\. \(1 pin applies here\)$`).MatchString(msg) {
 		t.Errorf("PIN message = %q", msg)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "s1")
@@ -187,16 +211,13 @@ func TestLoggingAndPins(t *testing.T) {
 		t.Errorf("no-match UNPIN message = %q", msg)
 	}
 	e.say("PIN: second rule about main", "s1")
-	if msg := sysMsg(t, e.say("UNPIN: main", "s1")); !strings.Contains(msg, "matched 2 pins") {
+	if msg := sysMsg(t, e.say("UNPIN: main", "s1")); !strings.Contains(msg, "matches several pins") {
 		t.Errorf("ambiguous UNPIN message = %q", msg)
 	}
 	if n := len(lines(t, filepath.Join(d, "pinned.jsonl"))); n != 2 {
 		t.Errorf("ambiguous UNPIN removed something: %d pins", n)
 	}
-	if data, _ := os.ReadFile(filepath.Join(d, "errors.log")); !strings.Contains(string(data), "matched 2") {
-		t.Errorf("ambiguous UNPIN not logged: %q", data)
-	}
-	if msg := sysMsg(t, e.say("UNPIN: x", "fresh")); !strings.Contains(msg, "no pins") {
+	if msg := sysMsg(t, e.say("UNPIN: x", "fresh")); !strings.Contains(msg, "no pins here") {
 		t.Errorf("UNPIN without pins = %q", msg)
 	}
 }
@@ -779,7 +800,7 @@ func TestPinScopes(t *testing.T) {
 	// Same text in two scopes: two ids; UNPIN by text is ambiguous, by id exact.
 	e.say("PIN: shared text", "s3")
 	e.say("PIN@repo: shared text", "s3")
-	if msg := sysMsg(t, e.say("UNPIN: shared text", "s3")); !strings.Contains(msg, "matched 2") {
+	if msg := sysMsg(t, e.say("UNPIN: shared text", "s3")); !strings.Contains(msg, "matches several") {
 		t.Errorf("ambiguous cross-scope UNPIN: %q", msg)
 	}
 	var repoID string
@@ -827,7 +848,7 @@ func TestPinLifetimes(t *testing.T) {
 
 	// /clear keeping the id, SessionEnd first.
 	cli(e.end("clear", "s1"), "hook", "session-end")
-	msg, ctx := hookOut(t, e.inject("clear", "s1"))
+	msg, ctx := hookOut(t, e.injectRaw("clear", "s1"))
 	for _, want := range []string{"dropped 1 pin", "plain rule", "kept 1 PIN!", "carried 1"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("clear message lacks %q: %q", want, msg)
@@ -841,7 +862,7 @@ func TestPinLifetimes(t *testing.T) {
 		t.Errorf("compact after clear: kept pin only:\n%s", out)
 	}
 	cli(e.end("clear", "s1"), "hook", "session-end")
-	if msg, ctx := hookOut(t, e.inject("clear", "s1")); strings.Contains(msg, "carried") || strings.Contains(ctx, "write the tests") || !strings.Contains(ctx, "sticky rule") {
+	if msg, ctx := hookOut(t, e.injectRaw("clear", "s1")); strings.Contains(msg, "carried") || strings.Contains(ctx, "write the tests") || !strings.Contains(ctx, "sticky rule") {
 		t.Errorf("a second clear: carry is one-shot, the kept pin stays: %q %q", msg, ctx)
 	}
 
@@ -850,7 +871,7 @@ func TestPinLifetimes(t *testing.T) {
 	e.say("CARRY: handoff two", "s2")
 	e.say("PIN!: sticky two", "s2")
 	cli(e.end("clear", "s2"), "hook", "session-end")
-	msg, ctx = hookOut(t, e.inject("clear", "s3"))
+	msg, ctx = hookOut(t, e.injectRaw("clear", "s3"))
 	if !strings.Contains(ctx, "handoff two") || !strings.Contains(ctx, "sticky two") || !strings.Contains(msg, "kept 1") {
 		t.Errorf("new id after clear: %q %q", msg, ctx)
 	}
@@ -861,7 +882,7 @@ func TestPinLifetimes(t *testing.T) {
 	// SessionStart(clear) before SessionEnd, same id.
 	e.say("PIN: p4", "s4")
 	e.say("PIN!: k4", "s4")
-	msg, ctx = hookOut(t, e.inject("clear", "s4"))
+	msg, ctx = hookOut(t, e.injectRaw("clear", "s4"))
 	cli(e.end("clear", "s4"), "hook", "session-end")
 	if !strings.Contains(msg, "p4") || !strings.Contains(ctx, "k4") {
 		t.Errorf("start-before-end: %q %q", msg, ctx)
@@ -897,7 +918,7 @@ func TestPinScopeReviewFixes(t *testing.T) {
 	e.say("PIN@repo: repo stays", "s1")
 	e.say("PIN: plain goes", "s1")
 	cli(e.end("clear", "s1"), "hook", "session-end")
-	msg, ctx := hookOut(t, e.inject("clear", "s1"))
+	msg, ctx := hookOut(t, e.injectRaw("clear", "s1"))
 	if strings.Contains(msg, "repo stays") || !strings.Contains(ctx, "repo stays") || !strings.Contains(msg, "plain goes") {
 		t.Errorf("key=repo PIN@repo must survive /clear: %q %q", msg, ctx)
 	}
@@ -1045,7 +1066,7 @@ func TestPromote(t *testing.T) {
 
 	e.say("PIN: alpha x", "s1")
 	e.say("PIN: alpha y", "s1")
-	if msg := sysMsg(t, e.say("PROMOTE: alpha", "s1")); !strings.Contains(msg, "matched 2") {
+	if msg := sysMsg(t, e.say("PROMOTE: alpha", "s1")); !strings.Contains(msg, "matches several") {
 		t.Errorf("ambiguous promote: %q", msg)
 	}
 
@@ -1125,5 +1146,298 @@ func TestLaunchFixes(t *testing.T) {
 	t.Setenv("AGENT_LEDGER_BUDGET_CHARS", "")
 	if out, _, _ := cli(nil, "inject"); !strings.Contains(out, "[cut; full text in decisions.jsonl]") || len(out) > 9000+400 {
 		t.Errorf("default budget: %d chars, cut marker missing", len(out))
+	}
+}
+
+func pinTexts(t *testing.T, path string) []string {
+	t.Helper()
+	var out []string
+	for _, l := range lines(t, path) {
+		var p ledger.Pin
+		if json.Unmarshal([]byte(l), &p) == nil {
+			out = append(out, p.Text+"|"+p.Life)
+		}
+	}
+	return out
+}
+
+// Forgetful users: loose UNPIN/PROMOTE matching, shortcuts, PINS?, and notes on
+// similar or duplicate pins.
+func TestForgivingPins(t *testing.T) {
+	e := setup(t)
+	d := e.dir("s1")
+	f := filepath.Join(d, "pinned.jsonl")
+
+	// A word missing from the middle, other case and punctuation still match.
+	e.say("PIN: Don't touch the migrations, the schema is frozen until Friday", "s1")
+	if msg := sysMsg(t, e.say("UNPIN: touch migrations FRIDAY", "s1")); !strings.Contains(msg, "unpinned") {
+		t.Errorf("loose UNPIN: %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 0 {
+		t.Errorf("loose UNPIN left %d pins", n)
+	}
+
+	// A miss lists the closest pins with their ids and removes nothing.
+	e.say("PIN: deploy only from the release branch", "s1")
+	e.say("PIN: use pnpm, not npm", "s1")
+	msg := sysMsg(t, e.say("UNPIN: deploy from staging branch", "s1"))
+	if !strings.Contains(msg, "no pin matches") || !strings.Contains(msg, "Closest") || !strings.Contains(msg, "deploy only from the release branch") || strings.Contains(msg, "pnpm") {
+		t.Errorf("miss without closest pins: %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 2 {
+		t.Errorf("a miss removed something: %d pins", n)
+	}
+
+	// PINS? is answered by blocking the prompt: the user sees the list, the model
+	// sees nothing, and it is not logged.
+	before := len(lines(t, filepath.Join(d, "prompts.jsonl")))
+	out := e.say("  PINS?  ", "s1")
+	var v map[string]string
+	if json.Unmarshal([]byte(out), &v) != nil || v["decision"] != "block" || !strings.Contains(v["reason"], "1. [") ||
+		!strings.Contains(v["reason"], "2. [") || !strings.Contains(v["reason"], "use pnpm") {
+		t.Errorf("PINS? output: %q", out)
+	}
+	if n := len(lines(t, filepath.Join(d, "prompts.jsonl"))); n != before {
+		t.Errorf("PINS? was logged")
+	}
+	if out := e.say("PINS?", "empty"); !strings.Contains(out, "No pins here") {
+		t.Errorf("PINS? with no pins: %q", out)
+	}
+
+	// Shortcuts: a number from PINS?, and the newest pin.
+	if msg := sysMsg(t, e.say("UNPIN: 1", "s1")); !strings.Contains(msg, "deploy only") {
+		t.Errorf("UNPIN: 1 = %q", msg)
+	}
+	e.say("PIN@repo: repo rule one", "s1")
+	e.say("PIN: newest rule", "s1")
+	if msg := sysMsg(t, e.say("UNPIN: last", "s1")); !strings.Contains(msg, "newest rule") {
+		t.Errorf("UNPIN: last = %q", msg)
+	}
+	if msg := sysMsg(t, e.say("UNPIN: last", "s1")); !strings.Contains(msg, "repo rule one") {
+		t.Errorf("UNPIN: last across stores = %q", msg)
+	}
+
+	// Exact duplicate (ignoring case and punctuation): not added again.
+	if msg := sysMsg(t, e.say("PIN: Use pnpm not NPM!", "s1")); !strings.Contains(msg, "already pinned") {
+		t.Errorf("duplicate PIN: %q", msg)
+	}
+	if got := pinTexts(t, f); len(got) != 1 {
+		t.Errorf("duplicate stored: %v", got)
+	}
+	// PIN! of a plain pin upgrades it instead of storing it twice.
+	if msg := sysMsg(t, e.say("PIN!: use pnpm, not npm", "s1")); !strings.Contains(msg, "now survives /clear") {
+		t.Errorf("PIN! upgrade: %q", msg)
+	}
+	if got := pinTexts(t, f); len(got) != 1 || got[0] != "use pnpm, not npm|keep" {
+		t.Errorf("after upgrade: %v", got)
+	}
+
+	// Similar pin: saved, with a note naming the old one; unrelated: no note.
+	e.say("PIN: don't touch the migrations, schema frozen until Friday", "s1")
+	msg = sysMsg(t, e.say("PIN: don't touch migrations until Monday", "s1"))
+	if !strings.Contains(msg, "pinned [") || !strings.Contains(msg, "Similar") || !strings.Contains(msg, "frozen until Friday") || !strings.Contains(msg, "UNPIN: ") {
+		t.Errorf("similar PIN: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PIN: run migrations before the tests", "s1")); strings.Contains(msg, "Similar") {
+		t.Errorf("unrelated pin flagged similar: %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 4 {
+		t.Errorf("want 4 pins, got %d", n)
+	}
+
+	// CARRY of a pinned text: both kept, different ids, UNPIN by id takes one.
+	msg = sysMsg(t, e.say("CARRY: use pnpm, not npm", "s1"))
+	if !strings.Contains(msg, "Similar") {
+		t.Errorf("CARRY of a pinned text: %q", msg)
+	}
+	var carryID string
+	for _, l := range lines(t, f) {
+		var p ledger.Pin
+		if json.Unmarshal([]byte(l), &p) == nil && p.Life == "carry" {
+			carryID = p.ID
+		}
+	}
+	if carryID == "" || carryID == strings.Split(strings.Split(sysMsg(t, e.say("PIN: use pnpm, not npm", "s1")), "[")[1], "]")[0] {
+		t.Errorf("CARRY and PIN share an id %q", carryID)
+	}
+	e.say("UNPIN: "+carryID, "s1")
+	if got := pinTexts(t, f); len(got) != 4 || strings.Contains(strings.Join(got, ","), "|carry") {
+		t.Errorf("UNPIN of the CARRY id: %v", got)
+	}
+
+	// Several matches: listed, nothing removed; PROMOTE uses the same matching.
+	if msg := sysMsg(t, e.say("UNPIN: migrations", "s1")); !strings.Contains(msg, "matches several") {
+		t.Errorf("ambiguous: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PROMOTE: friday migrations", "s1")); !strings.Contains(msg, "promoted") {
+		t.Errorf("loose PROMOTE: %q", msg)
+	}
+}
+
+func TestForgivingPinsReviewFixes(t *testing.T) {
+	e := setup(t)
+	d := e.dir("s1")
+	f := filepath.Join(d, "pinned.jsonl")
+
+	// An out-of-range number is refused, never matched as text ("node 17" has a 7).
+	e.say("PIN: use node 17", "s1")
+	if msg := sysMsg(t, e.say("UNPIN: 7", "s1")); !strings.Contains(msg, "no pin 7") {
+		t.Errorf("UNPIN: 7 with one pin = %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PROMOTE: 0", "s1")); !strings.Contains(msg, "no pin 0") {
+		t.Errorf("PROMOTE: 0 = %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 1 {
+		t.Errorf("out-of-range number removed a pin: %d left", n)
+	}
+
+	// Leading spaces before a command are fine; prose mentioning pin: is not a command.
+	if msg := sysMsg(t, e.say("  \n PIN: indented rule", "s1")); !strings.Contains(msg, "pinned [") {
+		t.Errorf("indented PIN: %q", msg)
+	}
+	if out := e.say("this prompt mentions pin: and PIN: in passing", "s1"); out != "" {
+		t.Errorf("prose treated as a command: %q", out)
+	}
+
+	// Legacy ledger: a PIN and a CARRY of one text under one id. UNPIN and the
+	// PIN! upgrade touch only the PIN.
+	legacy := `{"id":"abc123","ts":"2026-01-01T00:00:00Z","text":"same text"}` + "\n" +
+		`{"id":"abc123","ts":"2026-01-01T00:00:01Z","text":"same text","life":"carry"}` + "\n"
+	if err := os.WriteFile(f, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if msg := sysMsg(t, e.say("PIN!: same text", "s1")); !strings.Contains(msg, "now survives /clear") {
+		t.Errorf("legacy upgrade: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, f), ","); got != "same text|keep,same text|carry" {
+		t.Errorf("legacy upgrade touched the CARRY: %s", got)
+	}
+	if msg := sysMsg(t, e.say("UNPIN: 1", "s1")); !strings.Contains(msg, "unpinned [abc123]") {
+		t.Errorf("legacy UNPIN: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, f), ","); got != "same text|carry" {
+		t.Errorf("legacy UNPIN removed the CARRY too: %s", got)
+	}
+}
+
+func TestPinUX(t *testing.T) {
+	e := setup(t)
+	f := filepath.Join(e.dir("s1"), "pinned.jsonl")
+	block := func(out string) string {
+		var v map[string]string
+		if json.Unmarshal([]byte(out), &v) != nil || v["decision"] != "block" {
+			t.Errorf("want a block decision, got %q", out)
+		}
+		return v["reason"]
+	}
+
+	// Any case, only at the start.
+	if msg := sysMsg(t, e.say("pin: lower case works", "s1")); !strings.Contains(msg, "pinned [") {
+		t.Errorf("lower-case pin: %q", msg)
+	}
+	if !strings.Contains(block(e.say("pins?", "s1")), "lower case works") {
+		t.Errorf("pins? lower case")
+	}
+	help := block(e.say(" Ledger? ", "s1"))
+	for _, want := range []string{"PIN [ref]: <new text>", "UNPIN: <ref>", "PINS?", "ledger: 1 pins"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("LEDGER? lacks %q:\n%s", want, help)
+		}
+	}
+	if msg := sysMsg(t, e.say("Unpin: lower case", "s1")); !strings.Contains(msg, "unpinned") {
+		t.Errorf("Unpin: %q", msg)
+	}
+
+	// Look-alikes get a hint and save nothing; ordinary prose gets nothing.
+	for _, p := range []string{"PIN; keep it", "pin = keep it", "PIN keep it", "UNPIN 2"} {
+		if msg := sysMsg(t, e.say(p, "s1")); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, ":") {
+			t.Errorf("look-alike %q: %q", p, msg)
+		}
+	}
+	for _, p := range []string{"Pin the dependency to 1.2", "pinning is hard", "Carry on with the plan"} {
+		if out := e.say(p, "s1"); out != "" {
+			t.Errorf("prose %q got %q", p, out)
+		}
+	}
+	if msg := sysMsg(t, e.say("PIN@brnch: x", "s1")); !strings.Contains(msg, "no @brnch") {
+		t.Errorf("unknown scope: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PIN:   ", "s1")); !strings.Contains(msg, "needs text") {
+		t.Errorf("empty PIN: %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 0 {
+		t.Errorf("look-alikes saved %d pins", n)
+	}
+
+	// Reword in place: keeps store and lifetime, gets the new text's id.
+	e.say("PIN!: deploy on fridays", "s1")
+	e.say("PIN@repo: use pnpm", "s1")
+	msg := sysMsg(t, e.say("PIN [1]: never deploy on fridays", "s1"))
+	if !strings.Contains(msg, "reworded [") {
+		t.Errorf("reword: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, f), ","); got != "never deploy on fridays|keep" {
+		t.Errorf("after reword: %s", got)
+	}
+	if msg := sysMsg(t, e.say("pin [pnpm]: use pnpm 9", "s1")); !strings.Contains(msg, "this repo") {
+		t.Errorf("reword repo pin: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, filepath.Join(e.root, "@repo", "pinned.jsonl")), ","); got != "use pnpm 9|" {
+		t.Errorf("repo pin after reword: %s", got)
+	}
+	// Fixing only case or punctuation is a real change; rewording onto another pin's
+	// text is refused (it would duplicate that pin).
+	if msg := sysMsg(t, e.say("PIN [1]: Never deploy on Fridays.", "s1")); !strings.Contains(msg, "reworded [") {
+		t.Errorf("case-only reword: %q", msg)
+	}
+	e.say("PIN!: other rule", "s1")
+	if msg := sysMsg(t, e.say("PIN [other rule]: never deploy on fridays", "s1")); !strings.Contains(msg, "nothing changed") {
+		t.Errorf("reword onto another pin: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, f), ","); got != "Never deploy on Fridays.|keep,other rule|keep" {
+		t.Errorf("after refused reword: %s", got)
+	}
+	e.say("UNPIN: other rule", "s1")
+	if msg := sysMsg(t, e.say("PIN [nothing like it]: x", "s1")); !strings.Contains(msg, "Send PIN [<id>]: <new text>") {
+		t.Errorf("reword miss: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PIN! [1]: x", "s1")); !strings.Contains(msg, "To reword a pin") {
+		t.Errorf("PIN! [ref]: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("UNPIN: pnpm 9", "s1")); !strings.Contains(msg, "unpinned") {
+		t.Errorf("UNPIN after reword: %q", msg)
+	}
+
+	// After compaction the user is told what came back; the model gets the context.
+	e.say("a normal prompt", "s1")
+	out, _, _ := cli(e.start("compact", "s1"), "hook", "session-start")
+	var v struct {
+		Msg string `json:"systemMessage"`
+		H   struct {
+			Event   string `json:"hookEventName"`
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil || !strings.HasPrefix(v.Msg, "ledger: restored 1 pin, ") ||
+		v.H.Event != "SessionStart" || !strings.Contains(v.H.Context, "Never deploy on Fridays.") {
+		t.Errorf("compact output: %q", out)
+	}
+	if out, _, _ := cli(e.start("compact", "empty"), "hook", "session-start"); out != "" {
+		t.Errorf("compact with nothing: %q", out)
+	}
+	// A manual run prints the plain context.
+	t.Setenv("CLAUDE_SESSION_ID", "s1")
+	if out, _, _ := cli(nil, "inject"); !strings.HasPrefix(out, "## Agent ledger") {
+		t.Errorf("manual inject: %q", out)
+	}
+	t.Setenv("CLAUDE_SESSION_ID", "")
+
+	// The one-time hint, on the first startup in a repo.
+	os.Remove(filepath.Join(e.root, "hinted"))
+	if msg := sysMsg(t, e.injectRaw("startup", "new1")); !strings.Contains(msg, "agent-ledger is on") {
+		t.Errorf("first startup: %q", msg)
+	}
+	if out := e.injectRaw("startup", "new2"); out != "" {
+		t.Errorf("second startup: %q", out)
 	}
 }

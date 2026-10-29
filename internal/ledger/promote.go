@@ -1,7 +1,6 @@
 package ledger
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,26 +12,6 @@ import (
 const PromoteHeading = "## Pinned rules (promoted from agent-ledger)"
 
 const maxPromoteBytes = 1 << 20
-
-// findPin returns the one pin matching q (id, or contained text) across the
-// ledger and the scoped stores, its file, and the number of matching pins.
-func findPin(cwd, dir, q string) (Pin, string, int) {
-	var pick Pin
-	var at string
-	total := 0
-	for _, f := range unpinFiles(cwd, dir) {
-		seen := map[string]bool{}
-		for _, l := range readLines(f) {
-			var p Pin
-			if json.Unmarshal([]byte(l), &p) == nil && (p.ID == q || strings.Contains(p.Text, q)) && !seen[p.ID] {
-				seen[p.ID] = true
-				pick, at = p, f
-				total++
-			}
-		}
-	}
-	return pick, at, total
-}
 
 // PromoteTarget is the file PROMOTE: writes in the work tree of cwd: cfg.PromoteTo,
 // else AGENTS.md if it exists, else CLAUDE.md if it exists, else AGENTS.md.
