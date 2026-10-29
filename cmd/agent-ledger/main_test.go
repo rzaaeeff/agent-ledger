@@ -941,3 +941,116 @@ func TestPinScopeReviewFixes(t *testing.T) {
 		t.Errorf("pins of a deleted idle branch must be pruned (%d stores)", count())
 	}
 }
+
+func TestRedact(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"key AKIAABCDEFGHIJKLMNOP here", "key [REDACTED:aws-key] here"},
+		{"use ghp_" + strings.Repeat("a", 36), "use [REDACTED:github-token]"},
+		{"sk-ant-" + strings.Repeat("x", 30) + " ok", "[REDACTED:api-key] ok"},
+		{"password=hunter22 and more", "password=[REDACTED:secret] and more"},
+		{`"api_key": "abcd1234"`, `"api_key": "[REDACTED:secret]"`},
+		{"token=ghp_" + strings.Repeat("b", 36), "token=[REDACTED:github-token]"},
+		{"postgres://bob:s3cret@db/x", "postgres://bob:[REDACTED:url-password]@db/x"},
+		{"-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY----- done", "[REDACTED:private-key] done"},
+		{"the password is in the vault", "the password is in the vault"},
+		{"PIN: never commit to main", "PIN: never commit to main"},
+	} {
+		if got, _ := ledger.Redact(c.in); got != c.want {
+			t.Errorf("Redact(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPrivacy(t *testing.T) {
+	e := setup(t)
+	prompts := filepath.Join(e.dir("s1"), "prompts.jsonl")
+	msg := sysMsg(t, e.say("deploy with password=hunter22", "s1"))
+	if !strings.Contains(msg, "redacted 1 secret") || strings.Contains(lastField(t, prompts, "prompt"), "hunter22") {
+		t.Errorf("redaction: msg %q, stored %q", msg, lastField(t, prompts, "prompt"))
+	}
+	msg = sysMsg(t, e.say("PIN: token=abcd1234efgh", "s1"))
+	if !strings.Contains(msg, "pinned") || !strings.Contains(msg, "redacted 1") {
+		t.Errorf("pin redaction note: %q", msg)
+	}
+	if data, _ := os.ReadFile(filepath.Join(e.dir("s1"), "pinned.jsonl")); strings.Contains(string(data), "abcd1234") {
+		t.Errorf("secret stored in a pin: %s", data)
+	}
+
+	t.Setenv("AGENT_LEDGER_REDACT", "off")
+	e.say("password=plain1", "s1")
+	if !strings.Contains(lastField(t, prompts, "prompt"), "plain1") {
+		t.Error("redact=off must store verbatim")
+	}
+
+	t.Setenv("AGENT_LEDGER_LOGGING", "pins-only")
+	n := len(lines(t, prompts))
+	e.say("chatter", "s1")
+	e.say("PIN: logged pin", "s1")
+	if ls := lines(t, prompts); len(ls) != n+1 || !strings.Contains(ls[len(ls)-1], "logged pin") {
+		t.Errorf("pins-only must log only PIN-family prompts: %d -> %d", n, len(ls))
+	}
+
+	t.Setenv("AGENT_LEDGER_LOGGING", "off")
+	if out := e.say("PIN: still pinned", "s2"); !strings.Contains(out, "pinned") {
+		t.Errorf("logging=off must still pin: %q", out)
+	}
+	e.say("nothing logged", "s3")
+	if exists(filepath.Join(e.dir("s2"), "prompts.jsonl")) || exists(e.dir("s3")) {
+		t.Error("logging=off must leave no prompt log and no empty ledger")
+	}
+}
+
+func TestPromote(t *testing.T) {
+	e := setup(t)
+	agents := filepath.Join(e.repo, "AGENTS.md")
+	read := func(p string) string { b, _ := os.ReadFile(p); return string(b) }
+
+	// No AGENTS.md but a CLAUDE.md: CLAUDE.md gets the rule.
+	writeFile(t, filepath.Join(e.repo, "CLAUDE.md"), "# Rules\n\n- be brief\n")
+	e.say("PIN: run the tests first", "s1")
+	msg := sysMsg(t, e.say("PROMOTE: run the tests", "s1"))
+	if !strings.Contains(msg, "promoted") || !strings.Contains(msg, "CLAUDE.md") || !strings.Contains(msg, "0 pins") {
+		t.Errorf("promote: %q", msg)
+	}
+	if got := read(filepath.Join(e.repo, "CLAUDE.md")); got != "# Rules\n\n- be brief\n\n## Pinned rules (promoted from agent-ledger)\n\n- run the tests first\n" {
+		t.Errorf("CLAUDE.md:\n%s", got)
+	}
+
+	// AGENTS.md with the section in the middle: the rule lands at the section's end.
+	writeFile(t, agents, "# A\n\n## Pinned rules (promoted from agent-ledger)\n\n- one\n\n## Later\n\ntext\n")
+	e.say("PIN@repo: two\nlines", "s1")
+	if msg := sysMsg(t, e.say("PROMOTE: two", "s1")); !strings.Contains(msg, "AGENTS.md") {
+		t.Errorf("promote scoped pin: %q", msg)
+	}
+	if got := read(agents); got != "# A\n\n## Pinned rules (promoted from agent-ledger)\n\n- one\n- two lines\n\n## Later\n\ntext\n" {
+		t.Errorf("AGENTS.md:\n%s", got)
+	}
+	e.say("PIN: one", "s1")
+	if msg := sysMsg(t, e.say("PROMOTE: one", "s1")); !strings.Contains(msg, "already in AGENTS.md") || strings.Count(read(agents), "- one") != 1 {
+		t.Errorf("duplicate promote: %q\n%s", msg, read(agents))
+	}
+
+	e.say("PIN: alpha x", "s1")
+	e.say("PIN: alpha y", "s1")
+	if msg := sysMsg(t, e.say("PROMOTE: alpha", "s1")); !strings.Contains(msg, "matched 2") {
+		t.Errorf("ambiguous promote: %q", msg)
+	}
+
+	// promote_to: names only; a symlinked target is refused.
+	writeFile(t, filepath.Join(e.repo, ".agent-ledger.json"), `{"promote_to":"../evil.md"}`)
+	if c := ledger.LoadConfig(e.repo); c.PromoteTo != "" || len(c.Problems) != 1 {
+		t.Errorf("promote_to with a path must be ignored: %+v", c)
+	}
+	if runtime.GOOS != "windows" {
+		writeFile(t, filepath.Join(e.repo, ".agent-ledger.json"), `{"promote_to":"LINK.md"}`)
+		outside := filepath.Join(t.TempDir(), "outside.md")
+		writeFile(t, outside, "x\n")
+		os.Symlink(outside, filepath.Join(e.repo, "LINK.md"))
+		if msg := sysMsg(t, e.say("PROMOTE: alpha x", "s1")); !strings.Contains(msg, "PROMOTE failed") || read(outside) != "x\n" {
+			t.Errorf("symlinked target: %q", msg)
+		}
+		if out := e.inject("compact", "s1"); !strings.Contains(out, "alpha x") {
+			t.Error("a failed promote must keep the pin")
+		}
+	}
+}

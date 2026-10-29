@@ -76,9 +76,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		warnFallback(stderr)
 		path := filepath.Join(dir, ledger.DecisionsFile)
+		d := ledger.Decision{TS: ledger.Now().Format("2006-01-02T15:04:05-07:00"), Decision: args[1], Because: args[2], Rejected: args[3]}
+		if ledger.LoadConfig("").Redact == "on" {
+			d.Decision, _ = ledger.Redact(d.Decision)
+			d.Because, _ = ledger.Redact(d.Because)
+			d.Rejected, _ = ledger.Redact(d.Rejected)
+		}
 		if err := ledger.MkdirPrivate(dir); err == nil {
-			err = ledger.Append(path, ledger.Marshal(ledger.Decision{
-				TS: ledger.Now().Format("2006-01-02T15:04:05-07:00"), Decision: args[1], Because: args[2], Rejected: args[3]}))
+			err = ledger.Append(path, ledger.Marshal(d))
 		}
 		if err != nil {
 			fmt.Fprintln(stderr, "decide:", err)

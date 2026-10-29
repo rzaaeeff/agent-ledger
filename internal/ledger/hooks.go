@@ -72,6 +72,11 @@ func debug(root, event string, h HookInput) {
 //	PIN@global: <text> for every repo
 //	UNPIN: <id|text>   removes the pin with that id, or the only one containing the
 //	                   text, from any of those stores
+//	PROMOTE: <id|text> moves that pin into the repo's AGENTS.md (or CLAUDE.md, or
+//	                   promote_to), uncommitted
+//
+// Config logging=pins-only logs only these commands, logging=off logs no prompts
+// (pins are still kept); redact=on (default) masks credentials before storing.
 //
 // Plain stdout would reach the model, so it prints only a systemMessage JSON (shown
 // to the user) after PIN:/UNPIN:. Problems go to errors.log.
@@ -79,18 +84,39 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if h.Prompt == "" {
 		return
 	}
-	dir, err := DirFor(LoadConfig(h.Cwd), h.Cwd, h.SessionID)
-	if err != nil || MkdirPrivate(dir) != nil {
+	cfg := LoadConfig(h.Cwd)
+	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
+	if err != nil {
 		return
 	}
+	prompt, masked := h.Prompt, 0
+	if cfg.Redact == "on" {
+		prompt, masked = Redact(prompt)
+	}
+	cmd, ok := parsePin(prompt)
 	ts := stamp()
-	if Append(filepath.Join(dir, PromptsFile), Marshal(Prompt{ts, h.SessionID, h.Prompt})) != nil {
-		LogError(dir, "prompts append failed")
+	if cfg.Logging == "all" || (cfg.Logging == "pins-only" && ok) {
+		if MkdirPrivate(dir) != nil {
+			return
+		}
+		if Append(filepath.Join(dir, PromptsFile), Marshal(Prompt{ts, h.SessionID, prompt})) != nil {
+			LogError(dir, "prompts append failed")
+		}
 	}
-	cmd, ok := parsePin(h.Prompt)
+	note := ""
+	if masked > 0 {
+		note = fmt.Sprintf(" (redacted %d secret(s) before storing)", masked)
+	}
 	if !ok || cmd.text == "" {
+		if masked > 0 && cfg.Logging != "off" {
+			emit(out, "ledger:"+note)
+		}
 		return
 	}
+	if MkdirPrivate(dir) != nil {
+		return
+	}
+	out = &suffixWriter{w: out, suffix: note}
 	switch cmd.verb {
 	case "PIN", "CARRY":
 		target, where := dir, ""
@@ -148,7 +174,54 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			LogError(dir, fmt.Sprintf("UNPIN '%s' matched %d items; nothing removed", text, hits))
 			emit(out, fmt.Sprintf("UNPIN did nothing: '%s' matched %d pins (use the [id] from the pin list). %s", text, hits, Status(dir)))
 		}
+	case "PROMOTE":
+		if cmd.scope != "" || cmd.keep {
+			emit(out, "PROMOTE takes no scope or '!': PROMOTE: <id or text>.")
+			return
+		}
+		p, from, hits := findPin(h.Cwd, dir, cmd.text)
+		if hits != 1 {
+			emit(out, fmt.Sprintf("PROMOTE did nothing: '%s' matched %d pins (use the [id] from the pin list).", cmd.text, hits))
+			return
+		}
+		target, err := PromoteTarget(cfg, h.Cwd)
+		var added bool
+		if err == nil {
+			added, err = addRule(target, p.Text)
+		}
+		if err != nil {
+			LogError(dir, "promote failed: "+err.Error())
+			emit(out, "PROMOTE failed: "+err.Error())
+			return
+		}
+		if _, err := Unpin(from, p.ID); err != nil {
+			LogError(dir, "promote: unpin failed")
+		}
+		msg := fmt.Sprintf("promoted [%s] to %s and unpinned it. Not committed: review with git diff.", p.ID, filepath.Base(target))
+		if !added {
+			msg = fmt.Sprintf("[%s] was already in %s; unpinned it.", p.ID, filepath.Base(target))
+		}
+		emit(out, msg+" "+Status(dir))
 	}
+}
+
+// suffixWriter adds suffix to the systemMessage emitted through it (the redaction note).
+type suffixWriter struct {
+	w      io.Writer
+	suffix string
+}
+
+func (s *suffixWriter) Write(b []byte) (int, error) {
+	if s.suffix == "" {
+		return s.w.Write(b)
+	}
+	var v map[string]string
+	if json.Unmarshal(b, &v) == nil && v["systemMessage"] != "" {
+		v["systemMessage"] += s.suffix
+		_, err := fmt.Fprintf(s.w, "%s\n", Marshal(v))
+		return len(b), err
+	}
+	return s.w.Write(b)
 }
 
 // HookSessionStart prints what must survive a compaction: the ledger's pinned

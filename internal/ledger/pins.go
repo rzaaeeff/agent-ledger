@@ -108,7 +108,7 @@ type pinCmd struct {
 	text  string
 }
 
-var pinRe = regexp.MustCompile(`^(PIN|CARRY|UNPIN)(!)?(?:@(branch|repo|global))?:`)
+var pinRe = regexp.MustCompile(`^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:@(branch|repo|global))?:`)
 
 // parsePin recognises PIN:, PIN!:, PIN@<scope>:, CARRY: and UNPIN: at the very start
 // of a prompt (case-sensitive, so prose mentioning "pin:" is left alone).
