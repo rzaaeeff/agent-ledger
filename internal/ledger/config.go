@@ -73,7 +73,7 @@ func (c *Config) fields() []field {
 // DefaultConfig is today's behaviour.
 func DefaultConfig() Config {
 	c := Config{Key: KeySession, PruneDays: PruneDays, RecentPrompts: RecentPrompts,
-		Decisions: RecentDecs, BudgetBytes: Budget, Logging: "all", Redact: "on", Source: map[string]string{}}
+		Decisions: RecentDecs, BudgetBytes: Budget, Logging: "pins-only", Redact: "on", Source: map[string]string{}}
 	for _, f := range c.fields() {
 		c.Source[f.name] = "default"
 	}
@@ -112,9 +112,9 @@ func LoadConfig(cwd string) Config {
 		cwd, _ = os.Getwd()
 	}
 	c := DefaultConfig()
-	c.layerFile(UserConfigPath())
+	c.layerFile(UserConfigPath(), false)
 	if p := RepoConfigPath(cwd); p != "" {
-		c.layerFile(p)
+		c.layerFile(p, true)
 	}
 	for _, f := range c.fields() {
 		env := "AGENT_LEDGER_" + strings.ToUpper(f.name)
@@ -135,7 +135,42 @@ func LoadConfig(cwd string) Config {
 // maxConfigBytes caps a config file: the repo layer comes from any cloned repo.
 const maxConfigBytes = 64 << 10
 
-func (c *Config) layerFile(path string) {
+// stricter lists, per privacy setting, its values from most to least private. A
+// repo file (from any clone) may only move these toward the private end.
+var stricter = map[string][]string{
+	"logging": {"off", "pins-only", "all"},
+	"redact":  {"on", "off"},
+	"key":     {KeySession, KeyBranch, KeyRepo},
+}
+
+// loosens reports whether a repo file setting f to v would make it less private
+// than the value so far (prune_days: keeping ledgers longer, 0 being forever).
+func (c *Config) loosens(f field, v string) bool {
+	if order, ok := stricter[f.name]; ok && f.str != nil {
+		rank := func(x string) int {
+			for i, o := range order {
+				if strings.EqualFold(o, strings.TrimSpace(x)) {
+					return i
+				}
+			}
+			return -1
+		}
+		return rank(v) > rank(*f.str)
+	}
+	if f.name == "prune_days" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		days := func(d int) int {
+			if d == 0 {
+				return 1 << 30
+			}
+			return d
+		}
+		return err == nil && days(n) > days(*f.num)
+	}
+	return false
+}
+
+func (c *Config) layerFile(path string, repo bool) {
 	// Only a regular file (after symlinks), read with a cap: a committed symlink to
 	// /dev/zero or a FIFO must not hang or exhaust a hook.
 	if fi, err := os.Stat(path); err != nil {
@@ -175,14 +210,22 @@ func (c *Config) layerFile(path string) {
 			c.Problems = append(c.Problems, fmt.Sprintf("%s: unknown key %q ignored", path, name))
 			continue
 		}
-		switch v := raw[k].(type) {
+		var v string
+		switch x := raw[k].(type) {
 		case string:
-			c.set(f, v, path)
+			v = x
 		case float64:
-			c.set(f, strconv.FormatFloat(v, 'f', -1, 64), path)
+			v = strconv.FormatFloat(x, 'f', -1, 64)
 		default:
 			c.Problems = append(c.Problems, fmt.Sprintf("%s: %s: unsupported value type, ignored", path, k))
+			continue
 		}
+		if repo && c.loosens(f, v) {
+			v, _ = cut(v, 40)
+			c.Problems = append(c.Problems, fmt.Sprintf("%s: %s=%q ignored: a repo file can only make privacy settings stricter (set it in your own config or env)", path, k, v))
+			continue
+		}
+		c.set(f, v, path)
 	}
 }
 

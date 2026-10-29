@@ -1,13 +1,16 @@
 ---
 name: record-decision
 description: Record a design or process decision in the agent ledger so it survives compaction. Use when you and the user settle a non-obvious choice, especially one with rejected alternatives.
+allowed-tools: Bash(agent-ledger decide:*)
 ---
 
 Run, from the project directory, with literal arguments:
 
 ```
-"<this skill's base directory>/../../bin/agent-ledger" decide "<decision>" "<because>" "<rejected alternatives>"
+agent-ledger decide "<decision>" "<because>" "<rejected alternatives>"
 ```
+
+If `agent-ledger` is not on the PATH (Claude Code before 2.1.91, or Codex), use `"<this skill's base directory>/../../bin/agent-ledger"` instead.
 
 - Keep each argument to one sentence.
 - Use `-` for "rejected" when nothing was rejected.

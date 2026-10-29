@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Picks the prebuilt binary for this OS/arch, downloading it from the release once if missing.
+# The download goes to ${XDG_DATA_HOME:-~/.local/share}/agent-ledger/v<version>/, not into
+# the plugin folder, whose contents Codex fingerprints for hook approval.
 # Hook calls never fail the session: on any problem they log to skips.log and exit 0.
 set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,13 +36,15 @@ case "$(uname -m)" in
 esac
 ext=""; [ "$os" = windows ] && ext=".exe"
 name="agent-ledger-$os-$arch$ext"
+version="$(cat "$root/VERSION" 2>/dev/null)"
+data="${XDG_DATA_HOME:-$HOME/.local/share}/agent-ledger/v$version"
 bin="$here/$name"
+[ -x "$bin" ] || bin="$data/$name"
 
 download() {
-  version="$(cat "$root/VERSION" 2>/dev/null)"
   base="https://github.com/$repo/releases/download/v$version"
-  tmp="$here/.download.$$"
-  rm -rf "$tmp" && mkdir -p "$tmp" || { msg="cannot create $tmp"; return 1; }
+  tmp="$data/.download.$$"
+  mkdir -p "$data" && rm -rf "$tmp" && mkdir -p "$tmp" || { msg="cannot create $tmp"; return 1; }
   if ! curl -fsSL --max-time 60 -o "$tmp/$name" "$base/$name" 2>"$err" ||
     ! curl -fsSL --max-time 20 -o "$tmp/checksums.txt" "$base/checksums.txt" 2>"$err"; then
     rm -rf "$tmp"; msg="download of $name v$version failed"; return 1
@@ -65,7 +69,8 @@ if [ ! -x "$bin" ]; then
     # Hooks have a 10s budget: fetch in the background, one fetch at a time (a lock
     # older than 5 minutes is stale), and skip this event.
     err=/dev/null
-    lock="$here/.download.lock"
+    mkdir -p "$data" 2>/dev/null
+    lock="$data/.download.lock"
     if [ -n "$(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; fi
     if mkdir "$lock" 2>/dev/null; then
       (
@@ -75,7 +80,12 @@ if [ ! -x "$bin" ]; then
       ) </dev/null >/dev/null 2>&1 &
       disown 2>/dev/null
     fi
-    msg="$name missing; fetching v$(cat "$root/VERSION" 2>/dev/null) in the background"
+    msg="$name missing; fetching v$version in the background"
+    # Tell the user once per event that matters; the hook output must stay valid JSON.
+    case "${2-}" in
+      user-prompt-submit) printf '%s\n' '{"systemMessage":"agent-ledger is still installing (one-time download); this prompt was not recorded. If it was a PIN:, send it again in a few seconds."}' ;;
+      session-start) printf '%s\n' '{"systemMessage":"agent-ledger: downloading its binary in the background (one time)."}' ;;
+    esac
     fail hook
   fi
   err=/dev/stderr

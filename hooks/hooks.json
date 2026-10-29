@@ -9,7 +9,7 @@
     ],
     "SessionStart": [
       {
-        "matcher": "startup|clear|compact|resume",
+        "matcher": "startup|clear|compact|resume|fork",
         "hooks": [
           { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agent-ledger\" hook session-start", "timeout": 10 }
         ]

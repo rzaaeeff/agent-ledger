@@ -340,3 +340,9 @@ func setLife(path string, pin Pin, life string) error {
 		return writeReplace(path, []byte(data))
 	})
 }
+
+// sameText reports whether a and b are equal apart from spacing; a duplicate that
+// differs in case or punctuation is reported with the stored text.
+func sameText(a, b string) bool {
+	return strings.Join(strings.Fields(a), " ") == strings.Join(strings.Fields(b), " ")
+}

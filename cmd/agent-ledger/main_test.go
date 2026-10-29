@@ -30,9 +30,11 @@ func setup(t *testing.T) *env {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(state, "config"))
 	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_ENV_FILE", "AGENT_LEDGER_DEBUG",
 		"AGENT_LEDGER_KEY", "AGENT_LEDGER_CLEAR", "AGENT_LEDGER_PRUNE_DAYS", "AGENT_LEDGER_RECENT_PROMPTS",
-		"AGENT_LEDGER_DECISIONS", "AGENT_LEDGER_BUDGET_CHARS"} {
+		"AGENT_LEDGER_DECISIONS", "AGENT_LEDGER_BUDGET_BYTES", "AGENT_LEDGER_REDACT", "AGENT_LEDGER_PROMOTE_TO"} {
 		t.Setenv(k, "")
 	}
+	// Most tests cover prompt logging; the default (pins-only) has its own test.
+	t.Setenv("AGENT_LEDGER_LOGGING", "all")
 	repo := filepath.Join(t.TempDir(), "proj")
 	e := &env{t: t, repo: repo, state: state}
 	e.git("init", "-q", "-b", "main", repo)
@@ -139,16 +141,19 @@ func lastField(t *testing.T, path, field string) string {
 
 func sysMsg(t *testing.T, out string) string {
 	t.Helper()
-	var v map[string]string
-	if err := json.Unmarshal([]byte(out), &v); err == nil && len(v) == 2 && v["decision"] == "block" && v["reason"] != "" {
-		return v["reason"]
+	var v map[string]any
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("want one JSON object, got %q", out)
 	}
-	if err := json.Unmarshal([]byte(out), &v); err != nil || len(v) != 1 {
-		t.Fatalf("want exactly one {systemMessage} or block JSON, got %q", out)
+	if v["decision"] == "block" && len(v) == 2 {
+		if r, _ := v["reason"].(string); r != "" {
+			return r
+		}
 	}
-	msg, ok := v["systemMessage"]
-	if !ok {
-		t.Fatalf("want a systemMessage key, got %q", out)
+	delete(v, "hookSpecificOutput") // pending pin-change notices for the model
+	msg, ok := v["systemMessage"].(string)
+	if !ok || len(v) != 1 {
+		t.Fatalf("want a systemMessage or block JSON, got %q", out)
 	}
 	return msg
 }
@@ -665,8 +670,9 @@ func TestConfigLayers(t *testing.T) {
 	userFile := filepath.Join(e.state, "config", "agent-ledger", "config.json")
 	repoFile := filepath.Join(e.repo, ".agent-ledger.json")
 
+	t.Setenv("AGENT_LEDGER_LOGGING", "")
 	c := ledger.LoadConfig(e.repo)
-	if c.Key != "session" || c.Clear != "drop" || c.PruneDays != 30 || c.RecentPrompts != 5 || c.Decisions != 10 || c.BudgetBytes != 9000 || len(c.Problems) != 0 {
+	if c.Logging != "pins-only" || c.Key != "session" || c.Clear != "drop" || c.PruneDays != 30 || c.RecentPrompts != 5 || c.Decisions != 10 || c.BudgetBytes != 9000 || len(c.Problems) != 0 {
 		t.Fatalf("defaults changed: %+v", c)
 	}
 
@@ -1512,5 +1518,89 @@ func TestPinUX(t *testing.T) {
 	}
 	if out := e.injectRaw("startup", "new2"); out != "" {
 		t.Errorf("second startup: %q", out)
+	}
+}
+
+func TestRepoConfigCannotLoosenPrivacy(t *testing.T) {
+	e := setup(t)
+	t.Setenv("AGENT_LEDGER_LOGGING", "")
+	repoFile := filepath.Join(e.repo, ".agent-ledger.json")
+	writeFile(t, repoFile, `{"logging":"all","redact":"off","key":"repo","prune_days":0,"recent_prompts":2}`)
+	c := ledger.LoadConfig(e.repo)
+	if c.Logging != "pins-only" || c.Redact != "on" || c.Key != "session" || c.PruneDays != 30 || c.RecentPrompts != 2 || len(c.Problems) != 4 {
+		t.Errorf("a repo file loosened privacy: %+v %q", c, c.Problems)
+	}
+	writeFile(t, repoFile, `{"logging":"off","prune_days":7}`)
+	if c = ledger.LoadConfig(e.repo); c.Logging != "off" || c.PruneDays != 7 || len(c.Problems) != 0 {
+		t.Errorf("a repo file must be able to tighten: %+v %q", c, c.Problems)
+	}
+	userFile := filepath.Join(e.state, "config", "agent-ledger", "config.json")
+	writeFile(t, userFile, `{"logging":"all","key":"repo"}`)
+	writeFile(t, repoFile, `{"logging":"pins-only","key":"branch"}`)
+	if c = ledger.LoadConfig(e.repo); c.Logging != "pins-only" || c.Key != "branch" {
+		t.Errorf("tightening from the user's looser setting: %+v", c)
+	}
+	// Default pins-only: plain prompts are not stored, so none come back.
+	writeFile(t, userFile, `{}`)
+	os.Remove(repoFile)
+	e.say("PIN: keep me", "s1")
+	e.say("plain prompt text", "s1")
+	if b, _ := os.ReadFile(filepath.Join(e.dir("s1"), "prompts.jsonl")); strings.Contains(string(b), "plain prompt") {
+		t.Error("pins-only stored a plain prompt")
+	}
+	if out := e.inject("compact", "s1"); !strings.Contains(out, "keep me") || strings.Contains(out, "Last prompts") {
+		t.Errorf("pins-only compact:\n%s", out)
+	}
+}
+
+func TestDuplicateShowsStoredText(t *testing.T) {
+	e := setup(t)
+	e.say("PIN: don't modify Foo.go", "s1")
+	msg := sysMsg(t, e.say("PIN: don't modify foo.go", "s1"))
+	if !strings.Contains(msg, "already pinned") || !strings.Contains(msg, `"don't modify Foo.go"`) || !strings.Contains(msg, "PIN [") {
+		t.Errorf("duplicate with other case: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PIN:   don't modify   Foo.go", "s1")); strings.Contains(msg, " as ") {
+		t.Errorf("spacing-only duplicate: %q", msg)
+	}
+}
+
+func TestNoticesReachTheModel(t *testing.T) {
+	e := setup(t)
+	e.say("PIN: use tabs", "s1")
+	e.say("PIN: run go vet", "s1")
+	e.say("UNPIN: tabs", "s1")
+	e.say("PIN [vet]: run go vet and staticcheck", "s1")
+	out := e.say("next real prompt", "s1")
+	var v struct {
+		H struct {
+			Event   string `json:"hookEventName"`
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil || v.H.Event != "UserPromptSubmit" ||
+		!strings.Contains(v.H.Context, `removed pin`) || !strings.Contains(v.H.Context, `"use tabs"`) || !strings.Contains(v.H.Context, `"run go vet and staticcheck"`) {
+		t.Errorf("notices: %q", out)
+	}
+	if out := e.say("and another", "s1"); out != "" {
+		t.Errorf("notices must be told once: %q", out)
+	}
+}
+
+func TestOutsideGitRepo(t *testing.T) {
+	setup(t)
+	d := t.TempDir()
+	say := func(p string) string {
+		out, _, _ := cli(map[string]string{"prompt": p, "cwd": d, "session_id": "s1"}, "hook", "user-prompt-submit")
+		return out
+	}
+	if msg := sysMsg(t, say("PIN: x")); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git repository") {
+		t.Errorf("PIN outside git: %q", msg)
+	}
+	if out := say("PINS?"); !strings.Contains(out, `"decision":"block"`) || !strings.Contains(out, "git repository") {
+		t.Errorf("PINS? outside git: %q", out)
+	}
+	if out := say("hello"); out != "" {
+		t.Errorf("plain prompt outside git: %q", out)
 	}
 }

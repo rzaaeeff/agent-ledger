@@ -158,10 +158,22 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		if cfg.Logging == "off" {
 			note = ""
 		}
+		msg := ""
 		if hint := nearMiss(prompt); hint != "" {
-			emit(out, hint+note)
+			msg = hint + note
 		} else if note != "" {
-			emit(out, "ledger:"+note)
+			msg = "ledger:" + note
+		}
+		v := map[string]any{}
+		if msg != "" {
+			v["systemMessage"] = msg
+		}
+		// UNPIN/PROMOTE/reword blocked their prompt, so the model learns of them now.
+		if n := takeNotices(dir); n != "" {
+			v["hookSpecificOutput"] = map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": n}
+		}
+		if len(v) > 0 {
+			fmt.Fprintf(out, "%s\n", Marshal(v))
 		}
 		return
 	}
@@ -232,6 +244,10 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			switch {
 			case sameStore && normText(p.Text) == normText(cmd.text):
 				msg := fmt.Sprintf("already pinned [%s]", p.ID)
+				if !sameText(p.Text, cmd.text) {
+					// Case or punctuation differ ("Foo.go" vs "foo.go"): show the stored text.
+					msg += fmt.Sprintf(" as %q (if the difference matters: PIN [%s]: <text>)", short(p.Text, 60), p.ID)
+				}
 				if life == LifeKeep && p.Life == "" {
 					if err := setLife(file, p.Pin, LifeKeep); err != nil {
 						LogError(dir, "pin upgrade failed")
@@ -284,6 +300,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			case !ok:
 				block(out, fmt.Sprintf("UNPIN did nothing: [%s] was already gone. %s", p.ID, pinsHere()))
 			default:
+				notice(dir, fmt.Sprintf("The user removed pin [%s] %q; it no longer applies.", p.ID, p.Text))
 				block(out, fmt.Sprintf("unpinned [%s] %q. %s", p.ID, short(p.Text, 60), pinsHere()))
 			}
 			return
@@ -305,6 +322,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		} else if !ok {
 			unpinned = "it was already unpinned"
 		}
+		notice(dir, fmt.Sprintf("The user moved pin [%s] %q into %s as a project rule.", p.ID, p.Text, filepath.Base(target)))
 		msg := fmt.Sprintf("promoted [%s] to %s; %s. Not committed: review with git diff.", p.ID, filepath.Base(target), unpinned)
 		if !added {
 			msg = fmt.Sprintf("[%s] was already in %s; %s.", p.ID, filepath.Base(target), unpinned)
@@ -379,6 +397,7 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
 	case !ok:
 		block(out, fmt.Sprintf("PIN NOT SAVED: [%s] was removed meanwhile.", hit.ID))
 	default:
+		notice(dir, fmt.Sprintf("The user reworded pin [%s] %q; it is now [%s] %q.", hit.ID, hit.Text, p.ID, p.Text))
 		block(out, fmt.Sprintf("reworded [%s] -> [%s] (%s). %s", hit.ID, p.ID, hit.Where, brief(listPins(h.Cwd, dir, here))))
 	}
 }
@@ -777,4 +796,31 @@ func HookSessionEnd(h HookInput) {
 	}
 	markCleared(dir)
 	_ = ClearPins(dir, root, h.SessionID, h.Cwd)
+}
+
+// NoticesFile in a ledger holds pin changes the model has not been told about:
+// UNPIN, PROMOTE and rewording block their prompt, so the next prompt carries them.
+const NoticesFile = "notices.jsonl"
+
+func notice(dir, text string) {
+	_ = Append(filepath.Join(dir, NoticesFile), Marshal(map[string]string{"ts": stamp(), "text": text}))
+}
+
+// takeNotices removes and returns the pending notices as context for the model.
+func takeNotices(dir string) string {
+	path := filepath.Join(dir, NoticesFile)
+	if !fileExists(path) {
+		return ""
+	}
+	var lines []string
+	_ = withLock(path, func() error {
+		for _, n := range ReadJSONL[map[string]string](path) {
+			lines = append(lines, "- "+n["text"])
+		}
+		return os.Remove(path)
+	})
+	if len(lines) == 0 {
+		return ""
+	}
+	return capBytes("agent-ledger: the user changed pinned rules since your last turn:\n"+strings.Join(lines, "\n"), 4000)
 }
