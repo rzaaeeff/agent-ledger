@@ -5,6 +5,8 @@
 //	agent-ledger inject                                              (print the ledger, e.g. in Codex)
 //	agent-ledger decide "<decision>" "<because>" "<rejected>"
 //	agent-ledger status
+//	agent-ledger config                                              (effective settings and their source)
+//	agent-ledger preview [compact|clear|startup|resume]              (dry run of SessionStart)
 //	agent-ledger version
 package main
 
@@ -24,12 +26,14 @@ const usage = `usage:
   agent-ledger inject
   agent-ledger decide "<decision>" "<because>" "<rejected>"
   agent-ledger status
+  agent-ledger config
+  agent-ledger preview [compact|clear|startup|resume]
   agent-ledger version`
 
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 func warnFallback(stderr io.Writer) {
-	if ledger.SessionFromEnv() == "" {
+	if ledger.LoadConfig("").Key == ledger.KeySession && ledger.SessionFromEnv() == "" {
 		fmt.Fprintln(stderr, "ledger: no session id (CLAUDE_SESSION_ID and CLAUDE_CODE_SESSION_ID unset); using the branch ledger")
 	}
 }
@@ -94,6 +98,26 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 0
 		}
 		fmt.Fprintln(stdout, ledger.Status(dir))
+		return 0
+	case "config":
+		cwd, _ := os.Getwd()
+		fmt.Fprintln(stdout, ledger.LoadConfig(cwd).Describe())
+		fmt.Fprintln(stdout, "files: user", ledger.UserConfigPath()+", repo", ledger.RepoConfigPath(cwd))
+		return 0
+	case "preview":
+		source := "compact"
+		if len(args) > 1 {
+			source = args[1]
+		}
+		cwd, _ := os.Getwd()
+		cfg := ledger.LoadConfig(cwd)
+		text, err := ledger.Preview(cfg, cwd, "", source)
+		if err != nil {
+			fmt.Fprintln(stderr, "preview:", err)
+			return 2
+		}
+		warnFallback(stderr)
+		fmt.Fprintln(stdout, text)
 		return 0
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, "agent-ledger", version)

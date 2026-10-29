@@ -139,14 +139,22 @@ func TakeCleared(root, sid, cwd string, isNew bool) *Note {
 }
 
 // Prune deletes the session (and fallback branch) directories under root in which
-// nothing changed for PruneDays, except keep (the current one). It never follows
+// nothing changed for days (0: never), except keep (the current one). It never follows
 // symlinks and leaves files directly under root alone.
-func Prune(root, keep string) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return
+func Prune(root, keep string, days int) {
+	for _, path := range PruneCandidates(root, keep, days) {
+		_ = os.RemoveAll(path)
 	}
-	cutoff := Now().Add(-PruneDays * 24 * time.Hour)
+}
+
+// PruneCandidates lists what Prune would delete; nothing when days is 0.
+func PruneCandidates(root, keep string, days int) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil || days <= 0 {
+		return nil
+	}
+	var out []string
+	cutoff := Now().Add(-time.Duration(days) * 24 * time.Hour)
 	for _, e := range entries {
 		path := filepath.Join(root, e.Name())
 		if !e.IsDir() || e.Type()&fs.ModeSymlink != 0 || path == keep {
@@ -165,7 +173,8 @@ func Prune(root, keep string) {
 			return nil
 		})
 		if !recent {
-			_ = os.RemoveAll(path)
+			out = append(out, path)
 		}
 	}
+	return out
 }

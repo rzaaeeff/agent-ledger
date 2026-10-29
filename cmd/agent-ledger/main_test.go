@@ -27,7 +27,10 @@ func setup(t *testing.T) *env {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
 	// Run from inside Claude Code these would select its session; the tests set their own.
-	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_ENV_FILE", "AGENT_LEDGER_DEBUG"} {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(state, "config"))
+	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_ENV_FILE", "AGENT_LEDGER_DEBUG",
+		"AGENT_LEDGER_KEY", "AGENT_LEDGER_CLEAR", "AGENT_LEDGER_PRUNE_DAYS", "AGENT_LEDGER_RECENT_PROMPTS",
+		"AGENT_LEDGER_DECISIONS", "AGENT_LEDGER_BUDGET_CHARS"} {
 		t.Setenv(k, "")
 	}
 	repo := filepath.Join(t.TempDir(), "proj")
@@ -543,5 +546,135 @@ func TestSameNamedReposStayApart(t *testing.T) {
 	sub, _ := ledger.Root(e.repo)
 	if sub != a {
 		t.Fatalf("root is not stable: %q vs %q", a, sub)
+	}
+}
+
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfigLayers(t *testing.T) {
+	e := setup(t)
+	userFile := filepath.Join(e.state, "config", "agent-ledger", "config.json")
+	repoFile := filepath.Join(e.repo, ".agent-ledger.json")
+
+	c := ledger.LoadConfig(e.repo)
+	if c.Key != "session" || c.Clear != "drop" || c.PruneDays != 30 || c.RecentPrompts != 5 || c.Decisions != 10 || c.BudgetChars != 16000 || len(c.Problems) != 0 {
+		t.Fatalf("defaults changed: %+v", c)
+	}
+
+	writeFile(t, userFile, `{"key":"branch","recent_prompts":3,"prune_days":7}`)
+	writeFile(t, repoFile, `{"recent_prompts":2,"bogus":1,"decisions":"x","budget_chars":5}`)
+	t.Setenv("AGENT_LEDGER_PRUNE_DAYS", "0")
+	c = ledger.LoadConfig(e.repo)
+	if c.Key != "branch" || c.Source["key"] != userFile {
+		t.Errorf("user layer: key=%s from %s", c.Key, c.Source["key"])
+	}
+	if c.RecentPrompts != 2 || c.Source["recent_prompts"] != repoFile {
+		t.Errorf("repo layer must beat user: %d from %s", c.RecentPrompts, c.Source["recent_prompts"])
+	}
+	if c.PruneDays != 0 || c.Source["prune_days"] != "env AGENT_LEDGER_PRUNE_DAYS" {
+		t.Errorf("env must beat files: %d from %s", c.PruneDays, c.Source["prune_days"])
+	}
+	if c.Clear != "keep" {
+		t.Errorf("clear must default to keep for a shared ledger, got %s", c.Clear)
+	}
+	if c.Decisions != 10 || c.BudgetChars != 16000 || len(c.Problems) != 3 {
+		t.Errorf("bad values must be ignored and reported: %+v %q", c, c.Problems)
+	}
+	out, _, rc := cli(nil, "config")
+	for _, want := range []string{"key             branch", repoFile, "problem:", "unknown key \"bogus\""} {
+		if rc != 0 || !strings.Contains(out, want) {
+			t.Errorf("config output lacks %q:\n%s", want, out)
+		}
+	}
+
+	writeFile(t, repoFile, `not json`)
+	if c = ledger.LoadConfig(e.repo); c.RecentPrompts != 3 || len(c.Problems) != 1 {
+		t.Errorf("a broken repo file must be ignored: %+v %q", c, c.Problems)
+	}
+	// Hooks never fail on a broken config.
+	if out, errs, rc := cli(e.prompt("PIN: x", "s1"), "hook", "user-prompt-submit"); rc != 0 || errs != "" || !strings.Contains(out, "pinned") {
+		t.Errorf("hook with broken config: rc=%d out=%q err=%q", rc, out, errs)
+	}
+}
+
+func TestKeyModes(t *testing.T) {
+	e := setup(t)
+	t.Setenv("AGENT_LEDGER_KEY", "branch")
+	e.say("PIN: branch rule", "s1")
+	if !exists(filepath.Join(e.dir("main"), "pinned.jsonl")) {
+		t.Fatal("key=branch must use the branch ledger even with a session id")
+	}
+	if out := e.inject("startup", "s2"); !strings.Contains(out, "branch rule") {
+		t.Errorf("key=branch: a new session on the branch must see its pins:\n%s", out)
+	}
+	e.checkout("-b", "feat")
+	if out := e.inject("compact", "s1"); strings.Contains(out, "branch rule") {
+		t.Errorf("key=branch: another branch must not see main's pins:\n%s", out)
+	}
+
+	t.Setenv("AGENT_LEDGER_KEY", "repo")
+	e.say("PIN: repo rule", "s3")
+	e.checkout("main")
+	out := e.inject("compact", "s4")
+	if !strings.Contains(out, "repo rule") || strings.Contains(out, "branch rule") || !exists(filepath.Join(e.dir("@repo"), "pinned.jsonl")) {
+		t.Errorf("key=repo: one ledger across branches and sessions:\n%s", out)
+	}
+	// Shared ledgers keep pins on /clear by default and re-inject them (no prompts).
+	cli(e.end("clear", "s4"), "hook", "session-end")
+	out = e.inject("clear", "s4")
+	if !strings.Contains(out, "repo rule") || strings.Contains(out, "Last prompts") || strings.Contains(out, "systemMessage") {
+		t.Errorf("key=repo clear=keep must re-inject pins without prompts:\n%s", out)
+	}
+	// clear=drop on a shared ledger drops and reports, even for a new session id.
+	t.Setenv("AGENT_LEDGER_CLEAR", "drop")
+	cli(e.end("clear", "s4"), "hook", "session-end")
+	msg := sysMsg(t, e.inject("clear", "s5"))
+	if !strings.Contains(msg, "repo rule") || exists(filepath.Join(e.dir("@repo"), "pinned.jsonl")) {
+		t.Errorf("key=repo clear=drop: %q", msg)
+	}
+}
+
+func TestPreview(t *testing.T) {
+	e := setup(t)
+	t.Setenv("CLAUDE_SESSION_ID", "s1")
+	e.say("PIN: keep it short", "s1")
+	e.say("hello", "s1")
+	before := lines(t, filepath.Join(e.dir("s1"), "pinned.jsonl"))
+	old := e.dir("old")
+	writeFile(t, filepath.Join(old, "prompts.jsonl"), "{}\n")
+	past := time.Now().Add(-40 * 24 * time.Hour)
+	os.Chtimes(filepath.Join(old, "prompts.jsonl"), past, past)
+	os.Chtimes(old, past, past)
+
+	for src, want := range map[string][]string{
+		"compact": {"keep it short", "hello", "Injected as context"},
+		"clear":   {"dropped 1 pin", "keep it short"},
+		"startup": {"Would prune 1 ledger", "- old", "keep it short"},
+		"resume":  {"Nothing is injected on resume"},
+	} {
+		out, errs, rc := cli(nil, "preview", src)
+		for _, w := range want {
+			if rc != 0 || errs != "" || !strings.Contains(out, w) {
+				t.Errorf("preview %s lacks %q (rc=%d err=%q):\n%s", src, w, rc, errs, out)
+			}
+		}
+	}
+	if !exists(old) || len(lines(t, filepath.Join(e.dir("s1"), "pinned.jsonl"))) != len(before) || exists(filepath.Join(e.root, ".cleared.jsonl")) {
+		t.Error("preview must not prune or clear")
+	}
+	if _, _, rc := cli(nil, "preview", "bogus"); rc != 2 {
+		t.Error("preview with an unknown source must exit 2")
+	}
+	t.Setenv("AGENT_LEDGER_RECENT_PROMPTS", "0")
+	if out, _, _ := cli(nil, "preview"); strings.Contains(out, "hello") {
+		t.Errorf("recent_prompts=0 must re-inject no prompts:\n%s", out)
 	}
 }
