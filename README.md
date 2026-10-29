@@ -1,11 +1,12 @@
 # agent-ledger
 
-Pins, decisions and recent prompts that survive context compaction in Claude Code, scoped to **one session**.
+Pins, decisions and recent prompts that survive context compaction in Claude Code and Codex, scoped to **one session**.
 
 - `PIN: <text>` at the start of a prompt stores the text verbatim. `UNPIN: <id or text>` removes it (from any scope).
 - After `/compact` (or auto-compact), pins, the last 5 prompts and the last 10 decisions are re-injected.
 - After `/clear`, nothing is re-injected. You see a short list of the pins that were dropped.
 - Session ledgers idle for 30 days are pruned at startup.
+- A forked chat gets a new session id, so it starts its own ledger; scoped pins (below) still apply.
 - No dependencies: one static Go binary per OS, files under `~/.local/state/agent-ledger/<repo>-<hash>/<session>/` (0600). The hash of the repo path keeps same-named repos and submodules apart.
 
 ## Pins: scope and lifetime
@@ -32,6 +33,28 @@ After `/clear`, kept pins, carried notes and scoped pins reach the model as `add
 
 On the first hook, `bin/agent-ledger` fetches the binary for your OS/arch from the matching GitHub release in the background and checks its SHA-256; the ledger starts working from the next event. If that fails, hooks skip silently and log to `~/.local/state/agent-ledger/skips.log`. To use your own build, set `AGENT_LEDGER_BIN=/path/to/agent-ledger`.
 
+## Install (Codex)
+
+Codex loads the same plugin (it reads `.claude-plugin/` and `hooks/hooks.json`; hooks are on by default):
+
+```
+codex plugin marketplace add rzaaeeff/agent-ledger
+```
+
+Then install `agent-ledger` from `/plugins` and approve its hooks when Codex asks. `decide` and `status` find the session through `CODEX_THREAD_ID`.
+
+Codex differences:
+
+- `/clear` starts a new thread and nothing links it to the old one, so the new chat starts with an empty session ledger: no "dropped" list, and `PIN!:`/`CARRY:` do not cross it. For pins that must survive, use `PIN@branch:`/`PIN@repo:`, or set `"key": "branch"`.
+- Compaction re-injects as in Claude Code.
+- macOS and Linux only: on Windows, Codex runs hooks through `cmd.exe`, which does not expand `${CLAUDE_PLUGIN_ROOT}` or run the `sh` shim.
+
+Other CLIs without hooks: run `agent-ledger inject` at session start and paste or pipe its output (keyed by branch).
+
+## Performance
+
+Measured on a 2-core cloud VM, 30 pins and 200 prompts logged, 100 runs each: `user-prompt-submit` 48 ms, `session-start` (compact) 76 ms, `session-end` 37 ms, plus about 65 ms for the `bin/agent-ledger` shell shim. Most of it is `git` subprocesses. Every hook has a 10 s timeout and exits 0 on any error.
+
 ## Commands
 
 | Command | What it does |
@@ -40,7 +63,7 @@ On the first hook, `bin/agent-ledger` fetches the binary for your OS/arch from t
 | `agent-ledger status` | Show the ledger dir, pin count and token estimate |
 | `agent-ledger config` | Effective settings and where each came from |
 | `agent-ledger preview [source]` | Dry run of SessionStart (default `compact`) |
-| `agent-ledger inject` | Print the ledger as context (for CLIs without hooks, e.g. run at Codex session start) |
+| `agent-ledger inject` | Print the ledger as context (for CLIs without hooks) |
 | `agent-ledger hook <user-prompt-submit\|session-start\|session-end>` | Hook entry points; read the hook JSON on stdin, always exit 0 |
 
 ## Configuration
@@ -71,7 +94,7 @@ Bad files, unknown keys and invalid values are ignored; `agent-ledger config` sh
 
 With `key: session` (default):
 
-1. The hook's `session_id` (hooks), else `CLAUDE_SESSION_ID` (written to `CLAUDE_ENV_FILE` at session start), else `CLAUDE_CODE_SESSION_ID`.
+1. The hook's `session_id` (hooks), else `CLAUDE_SESSION_ID` (written to `CLAUDE_ENV_FILE` at session start), else `CLAUDE_CODE_SESSION_ID`, else Codex's `CODEX_THREAD_ID`.
 2. With no session id, the current git branch (`detached` for detached HEAD), so manual runs and other CLIs still work.
 
 Set `AGENT_LEDGER_DEBUG=1` to log every hook's input to `hooks.debug.log` in the repo ledger dir.

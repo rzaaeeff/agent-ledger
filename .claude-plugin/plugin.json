@@ -1,7 +1,7 @@
 {
   "name": "agent-ledger",
   "version": "0.1.0",
-  "description": "Verbatim pins, a decision log and recent prompts that survive compaction, scoped to one session; /clear shows what it dropped.",
+  "description": "Verbatim pins, a decision log and recent prompts that survive compaction in Claude Code and Codex, scoped to one session; /clear shows what it dropped.",
   "author": { "name": "Heydar Rzayev", "url": "https://github.com/rzaaeeff" },
   "repository": "https://github.com/rzaaeeff/agent-ledger"
 }
