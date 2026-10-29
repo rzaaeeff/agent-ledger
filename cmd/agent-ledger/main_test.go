@@ -41,6 +41,10 @@ func setup(t *testing.T) *env {
 		t.Fatalf("repo ledger root %q (%v)", root, err)
 	}
 	e.root = root
+	// The one-time hint has its own test; elsewhere it would be the only output.
+	if err := os.MkdirAll(root, 0o700); err != nil || os.WriteFile(filepath.Join(root, "hinted"), nil, 0o600) != nil {
+		t.Fatal(err)
+	}
 	e.git("-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
 	t.Chdir(repo)
 	return e
@@ -84,8 +88,28 @@ func (e *env) say(text, sid string) string {
 	return out
 }
 
+// inject returns what a SessionStart puts in the model's context; output with
+// only a systemMessage (the /clear report) is returned as it is.
 func (e *env) inject(src, sid string) string {
 	out, _, _ := cli(e.start(src, sid), "hook", "session-start")
+	return contextOf(out)
+}
+
+func (e *env) injectRaw(src, sid string) string {
+	out, _, _ := cli(e.start(src, sid), "hook", "session-start")
+	return out
+}
+
+func contextOf(out string) string {
+	var v struct {
+		H *struct {
+			Event   string `json:"hookEventName"`
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if json.Unmarshal([]byte(out), &v) == nil && v.H != nil {
+		return v.H.Context + "\n"
+	}
 	return out
 }
 
@@ -167,7 +191,7 @@ func TestLoggingAndPins(t *testing.T) {
 	}
 
 	msg := sysMsg(t, e.say("PIN: never commit to main", "s1"))
-	if !regexp.MustCompile(`^pinned \[[0-9a-f]{6}\]\. ledger: 1 pins`).MatchString(msg) {
+	if !regexp.MustCompile(`^pinned \[[0-9a-f]{6}\]\. \(1 pin applies here\)$`).MatchString(msg) {
 		t.Errorf("PIN message = %q", msg)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "s1")
@@ -824,7 +848,7 @@ func TestPinLifetimes(t *testing.T) {
 
 	// /clear keeping the id, SessionEnd first.
 	cli(e.end("clear", "s1"), "hook", "session-end")
-	msg, ctx := hookOut(t, e.inject("clear", "s1"))
+	msg, ctx := hookOut(t, e.injectRaw("clear", "s1"))
 	for _, want := range []string{"dropped 1 pin", "plain rule", "kept 1 PIN!", "carried 1"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("clear message lacks %q: %q", want, msg)
@@ -838,7 +862,7 @@ func TestPinLifetimes(t *testing.T) {
 		t.Errorf("compact after clear: kept pin only:\n%s", out)
 	}
 	cli(e.end("clear", "s1"), "hook", "session-end")
-	if msg, ctx := hookOut(t, e.inject("clear", "s1")); strings.Contains(msg, "carried") || strings.Contains(ctx, "write the tests") || !strings.Contains(ctx, "sticky rule") {
+	if msg, ctx := hookOut(t, e.injectRaw("clear", "s1")); strings.Contains(msg, "carried") || strings.Contains(ctx, "write the tests") || !strings.Contains(ctx, "sticky rule") {
 		t.Errorf("a second clear: carry is one-shot, the kept pin stays: %q %q", msg, ctx)
 	}
 
@@ -847,7 +871,7 @@ func TestPinLifetimes(t *testing.T) {
 	e.say("CARRY: handoff two", "s2")
 	e.say("PIN!: sticky two", "s2")
 	cli(e.end("clear", "s2"), "hook", "session-end")
-	msg, ctx = hookOut(t, e.inject("clear", "s3"))
+	msg, ctx = hookOut(t, e.injectRaw("clear", "s3"))
 	if !strings.Contains(ctx, "handoff two") || !strings.Contains(ctx, "sticky two") || !strings.Contains(msg, "kept 1") {
 		t.Errorf("new id after clear: %q %q", msg, ctx)
 	}
@@ -858,7 +882,7 @@ func TestPinLifetimes(t *testing.T) {
 	// SessionStart(clear) before SessionEnd, same id.
 	e.say("PIN: p4", "s4")
 	e.say("PIN!: k4", "s4")
-	msg, ctx = hookOut(t, e.inject("clear", "s4"))
+	msg, ctx = hookOut(t, e.injectRaw("clear", "s4"))
 	cli(e.end("clear", "s4"), "hook", "session-end")
 	if !strings.Contains(msg, "p4") || !strings.Contains(ctx, "k4") {
 		t.Errorf("start-before-end: %q %q", msg, ctx)
@@ -894,7 +918,7 @@ func TestPinScopeReviewFixes(t *testing.T) {
 	e.say("PIN@repo: repo stays", "s1")
 	e.say("PIN: plain goes", "s1")
 	cli(e.end("clear", "s1"), "hook", "session-end")
-	msg, ctx := hookOut(t, e.inject("clear", "s1"))
+	msg, ctx := hookOut(t, e.injectRaw("clear", "s1"))
 	if strings.Contains(msg, "repo stays") || !strings.Contains(ctx, "repo stays") || !strings.Contains(msg, "plain goes") {
 		t.Errorf("key=repo PIN@repo must survive /clear: %q %q", msg, ctx)
 	}
@@ -1293,5 +1317,114 @@ func TestForgivingPinsReviewFixes(t *testing.T) {
 	}
 	if got := strings.Join(pinTexts(t, f), ","); got != "same text|carry" {
 		t.Errorf("legacy UNPIN removed the CARRY too: %s", got)
+	}
+}
+
+func TestPinUX(t *testing.T) {
+	e := setup(t)
+	f := filepath.Join(e.dir("s1"), "pinned.jsonl")
+	block := func(out string) string {
+		var v map[string]string
+		if json.Unmarshal([]byte(out), &v) != nil || v["decision"] != "block" {
+			t.Errorf("want a block decision, got %q", out)
+		}
+		return v["reason"]
+	}
+
+	// Any case, only at the start.
+	if msg := sysMsg(t, e.say("pin: lower case works", "s1")); !strings.Contains(msg, "pinned [") {
+		t.Errorf("lower-case pin: %q", msg)
+	}
+	if !strings.Contains(block(e.say("pins?", "s1")), "lower case works") {
+		t.Errorf("pins? lower case")
+	}
+	help := block(e.say(" Ledger? ", "s1"))
+	for _, want := range []string{"PIN [ref]: <new text>", "UNPIN: <ref>", "PINS?", "ledger: 1 pins"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("LEDGER? lacks %q:\n%s", want, help)
+		}
+	}
+	if msg := sysMsg(t, e.say("Unpin: lower case", "s1")); !strings.Contains(msg, "unpinned") {
+		t.Errorf("Unpin: %q", msg)
+	}
+
+	// Look-alikes get a hint and save nothing; ordinary prose gets nothing.
+	for _, p := range []string{"PIN; keep it", "pin = keep it", "PIN keep it", "UNPIN 2"} {
+		if msg := sysMsg(t, e.say(p, "s1")); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, ":") {
+			t.Errorf("look-alike %q: %q", p, msg)
+		}
+	}
+	for _, p := range []string{"Pin the dependency to 1.2", "pinning is hard", "Carry on with the plan"} {
+		if out := e.say(p, "s1"); out != "" {
+			t.Errorf("prose %q got %q", p, out)
+		}
+	}
+	if msg := sysMsg(t, e.say("PIN@brnch: x", "s1")); !strings.Contains(msg, "no @brnch") {
+		t.Errorf("unknown scope: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PIN:   ", "s1")); !strings.Contains(msg, "needs text") {
+		t.Errorf("empty PIN: %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 0 {
+		t.Errorf("look-alikes saved %d pins", n)
+	}
+
+	// Reword in place: keeps store and lifetime, gets the new text's id.
+	e.say("PIN!: deploy on fridays", "s1")
+	e.say("PIN@repo: use pnpm", "s1")
+	msg := sysMsg(t, e.say("PIN [1]: never deploy on fridays", "s1"))
+	if !strings.Contains(msg, "reworded [") {
+		t.Errorf("reword: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, f), ","); got != "never deploy on fridays|keep" {
+		t.Errorf("after reword: %s", got)
+	}
+	if msg := sysMsg(t, e.say("pin [pnpm]: use pnpm 9", "s1")); !strings.Contains(msg, "this repo") {
+		t.Errorf("reword repo pin: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, filepath.Join(e.root, "@repo", "pinned.jsonl")), ","); got != "use pnpm 9|" {
+		t.Errorf("repo pin after reword: %s", got)
+	}
+	if msg := sysMsg(t, e.say("PIN [nothing like it]: x", "s1")); !strings.Contains(msg, "Send PIN [<id>]: <new text>") {
+		t.Errorf("reword miss: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PIN! [1]: x", "s1")); !strings.Contains(msg, "To reword a pin") {
+		t.Errorf("PIN! [ref]: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("UNPIN: pnpm 9", "s1")); !strings.Contains(msg, "unpinned") {
+		t.Errorf("UNPIN after reword: %q", msg)
+	}
+
+	// After compaction the user is told what came back; the model gets the context.
+	e.say("a normal prompt", "s1")
+	out, _, _ := cli(e.start("compact", "s1"), "hook", "session-start")
+	var v struct {
+		Msg string `json:"systemMessage"`
+		H   struct {
+			Event   string `json:"hookEventName"`
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil || !strings.HasPrefix(v.Msg, "ledger: restored 1 pin, ") ||
+		v.H.Event != "SessionStart" || !strings.Contains(v.H.Context, "never deploy on fridays") {
+		t.Errorf("compact output: %q", out)
+	}
+	if out, _, _ := cli(e.start("compact", "empty"), "hook", "session-start"); out != "" {
+		t.Errorf("compact with nothing: %q", out)
+	}
+	// A manual run prints the plain context.
+	t.Setenv("CLAUDE_SESSION_ID", "s1")
+	if out, _, _ := cli(nil, "inject"); !strings.HasPrefix(out, "## Agent ledger") {
+		t.Errorf("manual inject: %q", out)
+	}
+	t.Setenv("CLAUDE_SESSION_ID", "")
+
+	// The one-time hint, on the first startup in a repo.
+	os.Remove(filepath.Join(e.root, "hinted"))
+	if msg := sysMsg(t, e.injectRaw("startup", "new1")); !strings.Contains(msg, "agent-ledger is on") {
+		t.Errorf("first startup: %q", msg)
+	}
+	if out := e.injectRaw("startup", "new2"); out != "" {
+		t.Errorf("second startup: %q", out)
 	}
 }

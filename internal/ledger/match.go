@@ -3,6 +3,7 @@ package ledger
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -108,6 +109,7 @@ type located struct {
 	Pin
 	File  string
 	Where string
+	Scope string // "" for the current ledger, else the store's scope
 }
 
 // listPins is every pin that applies in cwd, in the order PINS? numbers them:
@@ -124,12 +126,12 @@ func listPins(cwd, dir, here string) []located {
 		case LifeCarry:
 			w = "CARRY, for the chat after /clear"
 		}
-		out = append(out, located{p, f, w})
+		out = append(out, located{p, f, w, ""})
 	}
 	for _, s := range PinScopes(cwd, dir) {
 		f := filepath.Join(s.Dir, PinnedFile)
 		for _, p := range ReadJSONL[Pin](f) {
-			out = append(out, located{p, f, s.Short})
+			out = append(out, located{p, f, s.Short, s.Name})
 		}
 	}
 	return out
@@ -236,6 +238,58 @@ func PinsList(pins []located) string {
 	}
 	b.WriteString("\nUNPIN: <number, id, words or last> removes one.")
 	return b.String()
+}
+
+// brief is the short state appended to PIN/UNPIN replies.
+func brief(n int) string { return "(" + pinsApply(n) + ")" }
+
+func pinsApply(n int) string {
+	if n == 1 {
+		return "1 pin applies here"
+	}
+	return fmt.Sprintf("%d pins apply here", n)
+}
+
+func fileExists(p string) bool { _, err := os.Lstat(p); return err == nil }
+
+// HelpText is what LEDGER? shows the user (never the model).
+func HelpText(status string) string {
+	return `agent-ledger keeps the lines you mark and puts them back after compaction.
+Start a prompt with (any case; only at the start):
+  PIN: <text>             keep in this chat (dropped on /clear)
+  PIN!: <text>            keep in this chat, also across /clear
+  CARRY: <text>           hand to the next chat after /clear, once
+  PIN@branch: / PIN@repo: / PIN@global: <text>   every chat on the branch / in the repo / everywhere
+  PIN [ref]: <new text>   reword a pin
+  UNPIN: <ref>            remove a pin
+  PROMOTE: <ref>          move a pin into AGENTS.md (uncommitted)
+  PINS?                   list pins          LEDGER?   this help
+<ref> is a number from PINS?, an id, "last", or words from the pin.
+Only you see PINS? and LEDGER?; the agent gets nothing.
+` + status
+}
+
+// replacePin swaps pin old (same id and lifetime) in path for p, under the lock.
+func replacePin(path string, old, p Pin) (bool, error) {
+	found := false
+	err := withLock(path, func() error {
+		var out []string
+		for _, l := range readLines(path) {
+			var q Pin
+			if json.Unmarshal([]byte(l), &q) == nil && q.ID == old.ID && q.Life == old.Life {
+				if found {
+					continue
+				}
+				found, l = true, string(Marshal(p))
+			}
+			out = append(out, l)
+		}
+		if !found {
+			return nil
+		}
+		return writeReplace(path, []byte(strings.Join(out, "\n")+"\n"))
+	})
+	return found, err
 }
 
 // setLife gives pin p (same id and lifetime) in path the lifetime life, under the lock.

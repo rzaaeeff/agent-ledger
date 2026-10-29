@@ -113,22 +113,45 @@ func DefaultBranches(cwd string) map[string]bool {
 type pinCmd struct {
 	verb  string // PIN | CARRY | UNPIN
 	keep  bool   // PIN!
-	scope string // "" (session) | branch | repo | global
+	scope string // "" (session) | branch | repo | global, or an unknown word
+	ref   string // PIN [ref]: rewords the pin ref selects
 	text  string
 }
 
-var pinRe = regexp.MustCompile(`^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:@(branch|repo|global))?:`)
+var pinRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:@([a-z]+))?(?:\s*\[([^\]\n]*)\])?\s*:`)
 
-// parsePin recognises PIN:, PIN!:, PIN@<scope>:, CARRY:, UNPIN: and PROMOTE: at the
-// start of a prompt, after any spaces (case-sensitive, so prose mentioning "pin:"
-// is left alone).
+// Look-alikes of a command that are not one: a wrong separator ("PIN; x",
+// "pin = x"), or the keyword in capitals without the colon ("PIN x").
+var (
+	nearRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(@[a-z]+)?\s*[;=]`)
+	capsRe = regexp.MustCompile(`^(PIN|CARRY|UNPIN|PROMOTE)(!)?(@[a-z]+)?\s+\S`)
+)
+
+// nearMiss is the hint for a prompt that looks like a command but is not one, or "".
+func nearMiss(prompt string) string {
+	p := strings.TrimLeft(prompt, " \t\r\n")
+	m := nearRe.FindStringSubmatch(p)
+	if m == nil {
+		m = capsRe.FindStringSubmatch(p)
+	}
+	if m == nil {
+		return ""
+	}
+	want := strings.ToUpper(m[1]) + m[2] + strings.ToLower(m[3]) + ":"
+	return fmt.Sprintf("ledger: nothing saved; this went to the agent as a normal prompt. Commands need the colon: %s ... (LEDGER? lists them)", want)
+}
+
+// parsePin recognises PIN:, PIN!:, PIN@<scope>:, PIN [ref]:, CARRY:, UNPIN: and
+// PROMOTE: at the start of a prompt, after any spaces, in any case. Only the start
+// counts, so prose mentioning "pin:" is left alone.
 func parsePin(prompt string) (pinCmd, bool) {
 	prompt = strings.TrimLeft(prompt, " \t\r\n")
 	m := pinRe.FindStringSubmatch(prompt)
 	if m == nil {
 		return pinCmd{}, false
 	}
-	return pinCmd{verb: m[1], keep: m[2] != "", scope: m[3], text: strings.TrimSpace(prompt[len(m[0]):])}, true
+	return pinCmd{verb: strings.ToUpper(m[1]), keep: m[2] != "", scope: strings.ToLower(m[3]), ref: strings.TrimSpace(m[4]),
+		text: strings.TrimSpace(prompt[len(m[0]):])}, true
 }
 
 // pinID is sha1(text)[:6] for session pins (as before scopes existed) and
