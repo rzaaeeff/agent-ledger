@@ -291,7 +291,7 @@ Start a prompt with (any case; only at the start):
   PIN@branch: / PIN@repo: / PIN@global: <text>   every chat on the branch / in the repo / everywhere
   PIN [ref]: <new text>   reword a pin
   UNPIN: <ref>            remove a pin
-  PROMOTE: <ref>          move a pin into AGENTS.md (uncommitted)
+  PROMOTE: <ref>          move a pin into CLAUDE.md or AGENTS.md (uncommitted)
   PINS?                   list pins          LEDGER?   this help
 <ref> is a number from PINS?, an id, "last", or words from the pin.
 Only you see PINS? and LEDGER?; the agent gets nothing.

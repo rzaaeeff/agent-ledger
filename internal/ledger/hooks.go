@@ -84,7 +84,7 @@ func debug(root, event string, h HookInput) {
 //	UNPIN: <ref>       removes the one pin ref selects, from any of those stores:
 //	                   an id, its number in PINS?, "last", or words in it in any
 //	                   order (case and punctuation ignored); else lists the closest
-//	PROMOTE: <ref>     moves that pin into the repo's AGENTS.md (or CLAUDE.md, or
+//	PROMOTE: <ref>     moves that pin into the repo's CLAUDE.md or AGENTS.md (or
 //	                   promote_to), uncommitted
 //	PIN [ref]: <text>  rewords that pin; it keeps its store and lifetime
 //	PINS?              blocks the prompt; the user (not the model) sees the pins
