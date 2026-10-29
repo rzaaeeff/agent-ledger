@@ -1,0 +1,11 @@
+{
+  "name": "agent-ledger",
+  "owner": { "name": "Heydar Rzayev", "url": "https://github.com/rzaaeeff" },
+  "plugins": [
+    {
+      "name": "agent-ledger",
+      "source": "./",
+      "description": "Session-scoped pins and decisions that survive compaction."
+    }
+  ]
+}

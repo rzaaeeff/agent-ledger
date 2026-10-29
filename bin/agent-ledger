@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Picks the prebuilt binary for this OS/arch, downloading it from the release once if missing.
+# Hook calls never fail the session: on any problem they log to skips.log and exit 0.
+set -u
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(dirname "$here")"
+repo="rzaaeeff/agent-ledger"
+
+fail() {
+  if [ "${1-}" = hook ]; then
+    state="${XDG_STATE_HOME:-$HOME/.local/state}/agent-ledger"
+    mkdir -p "$state" 2>/dev/null && chmod 700 "$state" 2>/dev/null
+    printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$msg" >>"$state/skips.log" 2>/dev/null
+    exit 0
+  fi
+  echo "agent-ledger: $msg" >&2
+  exit 1
+}
+
+if [ -n "${AGENT_LEDGER_BIN-}" ]; then
+  exec "$AGENT_LEDGER_BIN" "$@"
+fi
+
+case "$(uname -s)" in
+  Linux) os=linux ;;
+  Darwin) os=darwin ;;
+  MINGW* | MSYS* | CYGWIN*) os=windows ;;
+  *) msg="unsupported OS $(uname -s)"; fail "$@" ;;
+esac
+case "$(uname -m)" in
+  x86_64 | amd64) arch=amd64 ;;
+  arm64 | aarch64) arch=arm64 ;;
+  *) msg="unsupported arch $(uname -m)"; fail "$@" ;;
+esac
+ext=""; [ "$os" = windows ] && ext=".exe"
+name="agent-ledger-$os-$arch$ext"
+bin="$here/$name"
+
+if [ ! -x "$bin" ]; then
+  version="$(cat "$root/VERSION" 2>/dev/null)"
+  base="https://github.com/$repo/releases/download/v$version"
+  tmp="$(mktemp -d 2>/dev/null)" || { msg="mktemp failed"; fail "$@"; }
+  trap 'rm -rf "$tmp"' EXIT
+  err=/dev/stderr; [ "${1-}" = hook ] && err=/dev/null
+  if ! curl -fsSL --max-time 20 -o "$tmp/$name" "$base/$name" 2>"$err" ||
+    ! curl -fsSL --max-time 20 -o "$tmp/checksums.txt" "$base/checksums.txt" 2>"$err"; then
+    msg="download of $name v$version failed"; fail "$@"
+  fi
+  want="$(awk -v n="$name" '$2 == n || $2 == "*" n { print $1 }' "$tmp/checksums.txt")"
+  if command -v sha256sum >/dev/null; then
+    got="$(sha256sum "$tmp/$name" | awk '{print $1}')"
+  else
+    got="$(shasum -a 256 "$tmp/$name" | awk '{print $1}')"
+  fi
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    msg="checksum mismatch for $name v$version"; fail "$@"
+  fi
+  chmod 755 "$tmp/$name" && mv -f "$tmp/$name" "$bin" || { msg="cannot install $bin"; fail "$@"; }
+fi
+
+exec "$bin" "$@"
