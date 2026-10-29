@@ -6,6 +6,7 @@ Pins, decisions and recent prompts that survive context compaction in Claude Cod
 - After `/compact` (or auto-compact), pins, the last 5 prompts and the last 10 decisions are re-injected.
 - After `/clear`, nothing is re-injected. You see a short list of the pins that were dropped.
 - Session ledgers idle for 30 days are pruned at startup.
+- A forked chat gets a new session id, so it starts its own ledger; scoped pins (below) still apply.
 - No dependencies: one static Go binary per OS, files under `~/.local/state/agent-ledger/<repo>-<hash>/<session>/` (0600). The hash of the repo path keeps same-named repos and submodules apart.
 
 ## Pins: scope and lifetime
@@ -46,6 +47,7 @@ Codex differences:
 
 - `/clear` starts a new thread and nothing links it to the old one, so the new chat starts with an empty session ledger: no "dropped" list, and `PIN!:`/`CARRY:` do not cross it. For pins that must survive, use `PIN@branch:`/`PIN@repo:`, or set `"key": "branch"`.
 - Compaction re-injects as in Claude Code.
+- macOS and Linux only: on Windows, Codex runs hooks through `cmd.exe`, which does not expand `${CLAUDE_PLUGIN_ROOT}` or run the `sh` shim.
 
 Other CLIs without hooks: run `agent-ledger inject` at session start and paste or pipe its output (keyed by branch).
 
