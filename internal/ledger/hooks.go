@@ -328,9 +328,15 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
 		emit(out, strings.Replace(miss, "Send PIN [ref]: <id>", "Send PIN [<id>]: <new text>", 1))
 		return
 	}
-	if normText(hit.Text) == normText(cmd.text) {
+	if hit.Text == cmd.text {
 		emit(out, fmt.Sprintf("[%s] already says that.", hit.ID))
 		return
+	}
+	for _, o := range all {
+		if o.File == hit.File && o.ID != hit.ID && (o.Life == LifeCarry) == (hit.Life == LifeCarry) && normText(o.Text) == normText(cmd.text) {
+			emit(out, fmt.Sprintf("ledger: nothing changed: [%s] already says that. To drop the old one: UNPIN: %s", o.ID, hit.ID))
+			return
+		}
 	}
 	scope := hit.Scope
 	if hit.Life == LifeCarry {

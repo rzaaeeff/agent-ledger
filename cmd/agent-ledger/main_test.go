@@ -1385,6 +1385,19 @@ func TestPinUX(t *testing.T) {
 	if got := strings.Join(pinTexts(t, filepath.Join(e.root, "@repo", "pinned.jsonl")), ","); got != "use pnpm 9|" {
 		t.Errorf("repo pin after reword: %s", got)
 	}
+	// Fixing only case or punctuation is a real change; rewording onto another pin's
+	// text is refused (it would duplicate that pin).
+	if msg := sysMsg(t, e.say("PIN [1]: Never deploy on Fridays.", "s1")); !strings.Contains(msg, "reworded [") {
+		t.Errorf("case-only reword: %q", msg)
+	}
+	e.say("PIN!: other rule", "s1")
+	if msg := sysMsg(t, e.say("PIN [other rule]: never deploy on fridays", "s1")); !strings.Contains(msg, "nothing changed") {
+		t.Errorf("reword onto another pin: %q", msg)
+	}
+	if got := strings.Join(pinTexts(t, f), ","); got != "Never deploy on Fridays.|keep,other rule|keep" {
+		t.Errorf("after refused reword: %s", got)
+	}
+	e.say("UNPIN: other rule", "s1")
 	if msg := sysMsg(t, e.say("PIN [nothing like it]: x", "s1")); !strings.Contains(msg, "Send PIN [<id>]: <new text>") {
 		t.Errorf("reword miss: %q", msg)
 	}
@@ -1406,7 +1419,7 @@ func TestPinUX(t *testing.T) {
 		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal([]byte(out), &v); err != nil || !strings.HasPrefix(v.Msg, "ledger: restored 1 pin, ") ||
-		v.H.Event != "SessionStart" || !strings.Contains(v.H.Context, "never deploy on fridays") {
+		v.H.Event != "SessionStart" || !strings.Contains(v.H.Context, "Never deploy on Fridays.") {
 		t.Errorf("compact output: %q", out)
 	}
 	if out, _, _ := cli(e.start("compact", "empty"), "hook", "session-start"); out != "" {
