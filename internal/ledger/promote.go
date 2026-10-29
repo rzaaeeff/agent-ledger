@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -69,14 +70,19 @@ func addRule(path, text string) (added bool, err error) {
 		return false, err
 	}
 	rule := "- " + text
+	nl := "\n"
+	if strings.Contains(string(data), "\r\n") {
+		nl = "\r\n"
+	}
 	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	if content == "" {
 		lines = nil
 	}
+	heads := mdHeadings(lines)
 	start := -1
 	for i, l := range lines {
-		if strings.TrimSpace(l) == PromoteHeading {
+		if heads[i] && strings.TrimSpace(l) == PromoteHeading {
 			start = i
 		}
 	}
@@ -88,7 +94,7 @@ func addRule(path, text string) (added bool, err error) {
 	} else {
 		end := len(lines)
 		for i := start + 1; i < len(lines); i++ {
-			if strings.HasPrefix(lines[i], "#") {
+			if heads[i] {
 				end = i
 				break
 			}
@@ -109,16 +115,54 @@ func addRule(path, text string) (added bool, err error) {
 		lines = append(lines[:at], append(ins, lines[at:]...)...)
 	}
 	mode := os.FileMode(0o644)
-	if fi, err := os.Stat(path); err == nil {
+	if fi, err := os.Lstat(path); err == nil {
 		mode = fi.Mode().Perm()
 	}
-	tmp := path + ".agent-ledger.tmp"
-	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")+"\n"), mode); err != nil {
+	// CreateTemp uses O_EXCL with a random name, so a planted symlink is never followed.
+	f, err := os.CreateTemp(filepath.Dir(path), ".agent-ledger-*.tmp")
+	if err != nil {
 		return false, err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	tmp := f.Name()
+	_, werr := f.WriteString(strings.Join(lines, nl) + nl)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp, mode)
+	}
+	if werr == nil {
+		if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
+			werr = errors.New(filepath.Base(path) + " is not a regular file")
+		}
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, path)
+	}
+	if werr != nil {
 		os.Remove(tmp)
-		return false, err
+		return false, werr
 	}
 	return true, nil
+}
+
+var headingRe = regexp.MustCompile(`^ {0,3}#{1,6}(\s|$)`)
+var fenceRe = regexp.MustCompile("^ {0,3}(```|~~~)")
+
+// mdHeadings marks lines that are Markdown ATX headings outside fenced code blocks.
+func mdHeadings(lines []string) []bool {
+	out := make([]bool, len(lines))
+	fence := ""
+	for i, l := range lines {
+		if m := fenceRe.FindStringSubmatch(l); m != nil {
+			if fence == "" {
+				fence = m[1]
+			} else if fence == m[1] {
+				fence = ""
+			}
+			continue
+		}
+		out[i] = fence == "" && headingRe.MatchString(l)
+	}
+	return out
 }
