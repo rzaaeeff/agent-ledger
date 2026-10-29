@@ -3,6 +3,8 @@
 package ledger
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -65,7 +67,22 @@ func Root(cwd string) (string, error) {
 	if err != nil || common == "" {
 		return "", ErrNoRepo
 	}
-	repo := Safe(filepath.Base(filepath.Dir(filepath.Clean(common))), 60, false)
+	common = filepath.Clean(common)
+	if real, err := filepath.EvalSymlinks(common); err == nil {
+		common = real
+	}
+	// The hash of the repo's path keeps same-named repos (and all submodules, whose
+	// common dir is .git/modules/<name>) apart; the name keeps the dir readable.
+	name := filepath.Base(filepath.Dir(common))
+	if filepath.Base(common) != ".git" {
+		name = filepath.Base(common)
+	}
+	key := common
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		key = strings.ToLower(key)
+	}
+	sum := sha1.Sum([]byte(key))
+	repo := Safe(name, 60, false) + "-" + hex.EncodeToString(sum[:])[:6]
 	return filepath.Join(StateHome(), repo), nil
 }
 

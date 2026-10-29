@@ -6,7 +6,7 @@ Pins, decisions and recent prompts that survive context compaction in Claude Cod
 - After `/compact` (or auto-compact), pins, the last 5 prompts and the last 10 decisions are re-injected.
 - After `/clear`, nothing is re-injected. You see a short list of the pins that were dropped.
 - Session ledgers idle for 30 days are pruned at startup.
-- No dependencies: one static Go binary per OS, files under `~/.local/state/agent-ledger/<repo>/<session>/` (0600).
+- No dependencies: one static Go binary per OS, files under `~/.local/state/agent-ledger/<repo>-<hash>/<session>/` (0600). The hash of the repo path keeps same-named repos and submodules apart.
 
 ## Install (Claude Code)
 
@@ -15,7 +15,7 @@ Pins, decisions and recent prompts that survive context compaction in Claude Cod
 /plugin install agent-ledger@agent-ledger
 ```
 
-On first use, `bin/agent-ledger` downloads the binary for your OS/arch from the matching GitHub release and checks its SHA-256. If that fails, hooks skip silently and log to `~/.local/state/agent-ledger/skips.log`. To use your own build, set `AGENT_LEDGER_BIN=/path/to/agent-ledger`.
+On the first hook, `bin/agent-ledger` fetches the binary for your OS/arch from the matching GitHub release in the background and checks its SHA-256; the ledger starts working from the next event. If that fails, hooks skip silently and log to `~/.local/state/agent-ledger/skips.log`. To use your own build, set `AGENT_LEDGER_BIN=/path/to/agent-ledger`.
 
 ## Commands
 

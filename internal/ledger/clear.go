@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -24,28 +25,45 @@ type Note struct {
 	Pins    []Pin  `json:"pins"`
 }
 
-// ClearedAtFile records the last /clear of a session that keeps its id, so a later
-// compact re-injects only the prompts and decisions made after it.
-const ClearedAtFile = "cleared_at"
+// ClearMarkFile records where the prompt and decision logs stood at the last /clear
+// of a session that keeps its id, so a later compact re-injects only what came after.
+// Line offsets, not timestamps: stamps have one-second granularity.
+const ClearMarkFile = "clear_mark.json"
 
-// markCleared stamps the /clear time into an existing session dir.
+type clearMark struct {
+	Prompts   int `json:"prompts"`
+	Decisions int `json:"decisions"`
+}
+
+// markCleared records the current log lengths of an existing session dir.
 func markCleared(dir string) {
 	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-		_ = writeReplace(filepath.Join(dir, ClearedAtFile), []byte(Now().Format(time.RFC3339Nano)+"\n"))
+		m := clearMark{len(readLines(filepath.Join(dir, PromptsFile))), len(readLines(filepath.Join(dir, DecisionsFile)))}
+		_ = writeReplace(filepath.Join(dir, ClearMarkFile), append(Marshal(m), '\n'))
 	}
 }
 
-func clearedAt(dir string) time.Time {
-	data, _ := os.ReadFile(filepath.Join(dir, ClearedAtFile))
-	t, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
-	return t
+func readMark(dir string) clearMark {
+	var m clearMark
+	data, _ := os.ReadFile(filepath.Join(dir, ClearMarkFile))
+	_ = json.Unmarshal(data, &m)
+	return m
 }
 
-// after reports whether the entry stamped ts is not older than since; entries
-// with an unreadable stamp are kept.
-func after(ts string, since time.Time) bool {
-	t, err := time.Parse(time.RFC3339, ts)
-	return err != nil || since.IsZero() || !t.Before(since)
+// readJSONLFrom decodes the valid lines of path after its first skip lines.
+func readJSONLFrom[T any](path string, skip int) []T {
+	var out []T
+	ls := readLines(path)
+	if skip > len(ls) || skip < 0 {
+		skip = 0
+	}
+	for _, l := range ls[skip:] {
+		var v T
+		if json.Unmarshal([]byte(l), &v) == nil {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // ClearPins drops the pins of session dir: moves them to pinned.cleared.jsonl there

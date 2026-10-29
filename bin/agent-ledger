@@ -36,15 +36,14 @@ ext=""; [ "$os" = windows ] && ext=".exe"
 name="agent-ledger-$os-$arch$ext"
 bin="$here/$name"
 
-if [ ! -x "$bin" ]; then
+download() {
   version="$(cat "$root/VERSION" 2>/dev/null)"
   base="https://github.com/$repo/releases/download/v$version"
-  tmp="$(mktemp -d 2>/dev/null)" || { msg="mktemp failed"; fail "$@"; }
-  trap 'rm -rf "$tmp"' EXIT
-  err=/dev/stderr; [ "${1-}" = hook ] && err=/dev/null
-  if ! curl -fsSL --max-time 20 -o "$tmp/$name" "$base/$name" 2>"$err" ||
+  tmp="$here/.download.$$"
+  rm -rf "$tmp" && mkdir -p "$tmp" || { msg="cannot create $tmp"; return 1; }
+  if ! curl -fsSL --max-time 60 -o "$tmp/$name" "$base/$name" 2>"$err" ||
     ! curl -fsSL --max-time 20 -o "$tmp/checksums.txt" "$base/checksums.txt" 2>"$err"; then
-    msg="download of $name v$version failed"; fail "$@"
+    rm -rf "$tmp"; msg="download of $name v$version failed"; return 1
   fi
   want="$(awk -v n="$name" '$2 == n || $2 == "*" n { print $1 }' "$tmp/checksums.txt")"
   if command -v sha256sum >/dev/null; then
@@ -53,9 +52,34 @@ if [ ! -x "$bin" ]; then
     got="$(shasum -a 256 "$tmp/$name" | awk '{print $1}')"
   fi
   if [ -z "$want" ] || [ "$want" != "$got" ]; then
-    msg="checksum mismatch for $name v$version"; fail "$@"
+    rm -rf "$tmp"; msg="checksum mismatch for $name v$version"; return 1
   fi
-  chmod 755 "$tmp/$name" && mv -f "$tmp/$name" "$bin" || { msg="cannot install $bin"; fail "$@"; }
+  chmod 755 "$tmp/$name" && mv -f "$tmp/$name" "$bin"
+  rc=$?; rm -rf "$tmp"
+  [ $rc -eq 0 ] || msg="cannot install $bin"
+  return $rc
+}
+
+if [ ! -x "$bin" ]; then
+  if [ "${1-}" = hook ]; then
+    # Hooks have a 10s budget: fetch in the background, one fetch at a time (a lock
+    # older than 5 minutes is stale), and skip this event.
+    err=/dev/null
+    lock="$here/.download.lock"
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; fi
+    if mkdir "$lock" 2>/dev/null; then
+      (
+        ok=0; download || ok=1
+        rmdir "$lock" 2>/dev/null
+        [ $ok -eq 0 ] || fail hook
+      ) </dev/null >/dev/null 2>&1 &
+      disown 2>/dev/null
+    fi
+    msg="$name missing; fetching v$(cat "$root/VERSION" 2>/dev/null) in the background"
+    fail hook
+  fi
+  err=/dev/stderr
+  download || fail "$@"
 fi
 
 exec "$bin" "$@"

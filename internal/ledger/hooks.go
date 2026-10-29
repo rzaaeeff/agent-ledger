@@ -198,19 +198,9 @@ func Compose(dir string) string {
 		pinLines = append(pinLines, fmt.Sprintf("- [%s] %s", p.ID, p.Text))
 	}
 	pins := strings.Join(pinLines, "\n")
-	since := clearedAt(dir)
-	var prompts []Prompt
-	for _, p := range ReadJSONL[Prompt](filepath.Join(dir, PromptsFile)) {
-		if after(p.TS, since) {
-			prompts = append(prompts, p)
-		}
-	}
-	var decisions []Decision
-	for _, x := range ReadJSONL[Decision](filepath.Join(dir, DecisionsFile)) {
-		if after(x.TS, since) {
-			decisions = append(decisions, x)
-		}
-	}
+	mark := readMark(dir)
+	prompts := readJSONLFrom[Prompt](filepath.Join(dir, PromptsFile), mark.Prompts)
+	decisions := readJSONLFrom[Decision](filepath.Join(dir, DecisionsFile), mark.Decisions)
 
 	var recent, decs string
 	for r, d := RecentPrompts, RecentDecs; ; {

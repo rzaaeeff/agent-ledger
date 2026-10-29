@@ -31,8 +31,13 @@ func setup(t *testing.T) *env {
 		t.Setenv(k, "")
 	}
 	repo := filepath.Join(t.TempDir(), "proj")
-	e := &env{t: t, repo: repo, state: state, root: filepath.Join(state, "agent-ledger", "proj")}
+	e := &env{t: t, repo: repo, state: state}
 	e.git("init", "-q", "-b", "main", repo)
+	root, err := ledger.Root(repo)
+	if err != nil || !strings.HasPrefix(root, filepath.Join(state, "agent-ledger", "proj-")) {
+		t.Fatalf("repo ledger root %q (%v)", root, err)
+	}
+	e.root = root
 	e.git("-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
 	t.Chdir(repo)
 	return e
@@ -408,8 +413,6 @@ func TestClear(t *testing.T) {
 	if out := e.inject("clear", "s1"); out != "" {
 		t.Errorf("second clear start printed %q", out)
 	}
-	ledger.Now = func() time.Time { return time.Now().Add(2 * time.Second) }
-	defer func() { ledger.Now = time.Now }()
 	e.say("after the clear", "s1")
 	if out := e.inject("compact", "s1"); strings.Contains(out, "never commit to main") || strings.Contains(out, "keep the critique") || !strings.Contains(out, "after the clear") {
 		t.Errorf("compact after clear must show only what came after it (no pins, no earlier prompts):\n%s", out)
@@ -525,5 +528,20 @@ func TestVersionAndUsage(t *testing.T) {
 	}
 	if _, _, rc := cli(nil, "bogus"); rc != 2 {
 		t.Error("unknown command must exit 2")
+	}
+}
+
+func TestSameNamedReposStayApart(t *testing.T) {
+	e := setup(t)
+	other := filepath.Join(t.TempDir(), "proj")
+	e.git("init", "-q", "-b", "main", other)
+	a, errA := ledger.Root(e.repo)
+	b, errB := ledger.Root(other)
+	if errA != nil || errB != nil || a == b {
+		t.Fatalf("two repos named proj share a ledger root: %q %q (%v %v)", a, b, errA, errB)
+	}
+	sub, _ := ledger.Root(e.repo)
+	if sub != a {
+		t.Fatalf("root is not stable: %q vs %q", a, sub)
 	}
 }
