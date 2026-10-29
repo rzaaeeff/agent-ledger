@@ -120,8 +120,13 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			target, where = GlobalDir(), " for every repo"
 		}
 		scope := cmd.scope
-		if filepath.Clean(target) == filepath.Clean(dir) {
-			scope = ""
+		if cmd.scope != "" && filepath.Clean(target) == filepath.Clean(dir) {
+			// key=repo: the repo pins live in the ledger itself; keep them on /clear.
+			scope, life = "", LifeKeep
+		}
+		if cmd.scope == ScopeBranch && MkdirPrivate(target) == nil {
+			b, _ := git(h.Cwd, "branch", "--show-current")
+			_ = writeReplace(filepath.Join(target, BranchNameFile), []byte(b+"\n"))
 		}
 		id := pinID(scope, cmd.text)
 		if MkdirPrivate(target) != nil || Append(filepath.Join(target, PinnedFile), Marshal(Pin{id, ts, cmd.text, life})) != nil {
@@ -184,17 +189,23 @@ func HookSessionStart(h HookInput, out io.Writer) {
 			cfg.RecentPrompts = 0
 			break
 		}
+		markHandled(dir)
 		if h.SessionID != "" {
 			cleared(cfg, root, dir, h, out)
 		}
 		return
 	case "startup":
-		Prune(root, dir, cfg.PruneDays)
+		Prune(h.Cwd, root, dir, cfg.PruneDays)
 	}
 	if h.Source == "clear" {
 		// clear=keep: no prompts, plus the CARRY handoff, once.
 		text := Compose(h.Cwd, dir, cfg)
-		if c := takeCarry(dir); len(c) > 0 {
+		c := takeCarry(dir)
+		_, statErr := os.Stat(dir)
+		if note := TakeCleared(root, h.SessionID, h.Cwd, statErr != nil || cfg.Key != KeySession); note != nil {
+			c = append(c, note.Carry...)
+		}
+		if len(c) > 0 {
 			text = strings.TrimLeft(text+"\n### Carried over from before /clear (once)\n"+strings.Join(pinLines(c, false), "\n"), "\n")
 		}
 		if text != "" {
@@ -366,11 +377,20 @@ func HookSessionEnd(h HookInput) {
 		return
 	}
 	cfg := LoadConfig(h.Cwd)
-	if cfg.Clear != "drop" {
+	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
+	if err != nil || handledRecently(dir) {
 		return
 	}
-	if dir, err := DirFor(cfg, h.Cwd, h.SessionID); err == nil {
-		markCleared(dir)
-		_ = ClearPins(dir, root, h.SessionID, h.Cwd)
+	if cfg.Clear != "drop" {
+		// clear=keep: only hand the CARRY items over, in case /clear changes the id.
+		if c := takeCarry(dir); len(c) > 0 {
+			now := Now()
+			_ = Append(filepath.Join(root, NotesFile), Marshal(Note{
+				N: fmt.Sprintf("%s.%d.%d", h.SessionID, now.UnixNano(), os.Getpid()), Session: h.SessionID,
+				Cwd: h.Cwd, Dir: dir, Epoch: now.Unix(), Carry: c}))
+		}
+		return
 	}
+	markCleared(dir)
+	_ = ClearPins(dir, root, h.SessionID, h.Cwd)
 }

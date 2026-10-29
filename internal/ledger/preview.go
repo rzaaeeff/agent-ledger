@@ -51,7 +51,7 @@ func Preview(cfg Config, cwd, sid, source string) (string, error) {
 		}
 		cfg.RecentPrompts = 0
 	case "startup":
-		if c := PruneCandidates(root, dir, cfg.PruneDays); len(c) > 0 {
+		if c := PruneCandidates(cwd, root, dir, cfg.PruneDays); len(c) > 0 {
 			fmt.Fprintf(&b, "Would prune %d ledger(s) idle for %d+ days:\n", len(c), cfg.PruneDays)
 			for _, p := range c {
 				fmt.Fprintf(&b, "- %s\n", filepath.Base(p))

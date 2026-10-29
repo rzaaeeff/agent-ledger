@@ -875,3 +875,69 @@ func TestPinLifetimes(t *testing.T) {
 		t.Errorf("preview clear lifetimes:\n%s", out)
 	}
 }
+
+func TestPinScopeReviewFixes(t *testing.T) {
+	e := setup(t)
+	// 1. key=repo: PIN@repo lives in the ledger itself and survives /clear.
+	t.Setenv("AGENT_LEDGER_KEY", "repo")
+	t.Setenv("AGENT_LEDGER_CLEAR", "drop")
+	e.say("PIN@repo: repo stays", "s1")
+	e.say("PIN: plain goes", "s1")
+	cli(e.end("clear", "s1"), "hook", "session-end")
+	msg, ctx := hookOut(t, e.inject("clear", "s1"))
+	if strings.Contains(msg, "repo stays") || !strings.Contains(ctx, "repo stays") || !strings.Contains(msg, "plain goes") {
+		t.Errorf("key=repo PIN@repo must survive /clear: %q %q", msg, ctx)
+	}
+	t.Setenv("AGENT_LEDGER_KEY", "")
+	t.Setenv("AGENT_LEDGER_CLEAR", "")
+
+	// 2. clear=keep, new id: CARRY is handed over by SessionEnd.
+	t.Setenv("AGENT_LEDGER_CLEAR", "keep")
+	e.say("CARRY: handoff across ids", "k1")
+	cli(e.end("clear", "k1"), "hook", "session-end")
+	if out := e.inject("clear", "k2"); !strings.Contains(out, "handoff across ids") {
+		t.Errorf("clear=keep new id lost the carry:\n%s", out)
+	}
+	t.Setenv("AGENT_LEDGER_CLEAR", "")
+
+	// 3. SessionStart before SessionEnd: no orphan note left behind.
+	e.say("PIN!: only kept", "o1")
+	e.inject("clear", "o1")
+	cli(e.end("clear", "o1"), "hook", "session-end")
+	if exists(filepath.Join(e.root, ".cleared.jsonl")) {
+		data, _ := os.ReadFile(filepath.Join(e.root, ".cleared.jsonl"))
+		t.Errorf("orphan note after start-then-end: %s", data)
+	}
+
+	// 4. Branches that sanitise alike keep separate pins.
+	e.checkout("-b", "feat/x")
+	e.say("PIN@branch: slash", "b1")
+	e.checkout("main")
+	e.checkout("-b", "feat_x")
+	if out := e.inject("compact", "b2"); strings.Contains(out, "slash") {
+		t.Errorf("feat_x sees feat/x's pins:\n%s", out)
+	}
+
+	// 5. Idle branch pins are pruned only once the branch is gone.
+	past := time.Now().Add(-90 * 24 * time.Hour)
+	age := func() {
+		filepath.WalkDir(e.root, func(p string, d os.DirEntry, _ error) error {
+			if strings.Contains(p, "@branch-") {
+				os.Chtimes(p, past, past)
+			}
+			return nil
+		})
+	}
+	count := func() int { m, _ := filepath.Glob(filepath.Join(e.root, "@branch-*")); return len(m) }
+	age()
+	e.inject("startup", "p1")
+	if count() != 1 {
+		t.Fatalf("idle pins of an existing branch were pruned (%d stores)", count())
+	}
+	e.git("-C", e.repo, "branch", "-D", "feat/x")
+	age()
+	e.inject("startup", "p2")
+	if count() != 0 {
+		t.Errorf("pins of a deleted idle branch must be pruned (%d stores)", count())
+	}
+}

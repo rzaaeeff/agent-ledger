@@ -185,14 +185,15 @@ func mergeNote(into *Note, n Note) *Note {
 // Prune deletes the session (and fallback branch) directories under root in which
 // nothing changed for days (0: never), except keep (the current one). It never follows
 // symlinks and leaves files directly under root alone.
-func Prune(root, keep string, days int) {
-	for _, path := range PruneCandidates(root, keep, days) {
+func Prune(cwd, root, keep string, days int) {
+	for _, path := range PruneCandidates(cwd, root, keep, days) {
 		_ = os.RemoveAll(path)
 	}
 }
 
 // PruneCandidates lists what Prune would delete; nothing when days is 0.
-func PruneCandidates(root, keep string, days int) []string {
+// Branch pin stores go only once their branch is gone from the repo of cwd.
+func PruneCandidates(cwd, root, keep string, days int) []string {
 	entries, err := os.ReadDir(root)
 	if err != nil || days <= 0 {
 		return nil
@@ -204,6 +205,16 @@ func PruneCandidates(root, keep string, days int) []string {
 		// The repo-wide pins are standing rules: never idle-pruned.
 		if !e.IsDir() || e.Type()&fs.ModeSymlink != 0 || path == keep || e.Name() == RepoKey {
 			continue
+		}
+		if strings.HasPrefix(e.Name(), "@branch-") {
+			data, err := os.ReadFile(filepath.Join(path, BranchNameFile))
+			name := strings.TrimSpace(string(data))
+			if err != nil || name == "" {
+				continue
+			}
+			if _, err := git(cwd, "show-ref", "--verify", "--quiet", "refs/heads/"+name); err == nil {
+				continue
+			}
 		}
 		recent := false
 		_ = filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {

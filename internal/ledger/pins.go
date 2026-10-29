@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Pin lifetimes (session pins only; scoped pins always outlive /clear).
@@ -61,12 +62,31 @@ func PinScopes(cwd, dir string) []Scope {
 // branchKey is the dir of PIN@branch pins: apart from the branch-keyed ledgers
 // (key=branch, or no session id), so those never surface as branch pins. Safe never
 // produces "@".
+// The hash of the raw name keeps branches that sanitise alike (feat/x, feat_x) apart.
 func branchKey(b string) string {
-	k := Safe(b, 100, true)
-	if k == "" {
-		k = "unnamed"
+	sum := sha1.Sum([]byte(b))
+	return "@branch-" + Safe(b, 80, true) + "-" + hex.EncodeToString(sum[:])[:6]
+}
+
+// BranchNameFile in a @branch-* store holds the raw branch name, so Prune can
+// tell whether the branch still exists.
+const BranchNameFile = "branch"
+
+// HandledFile in a ledger marks that SessionStart(clear) handled a /clear there;
+// a SessionEnd(clear) arriving just after then does nothing (no orphan note).
+const HandledFile = "clear_handled"
+
+func markHandled(dir string) {
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		_ = os.WriteFile(filepath.Join(dir, HandledFile), nil, 0o600)
+		now := Now()
+		_ = os.Chtimes(filepath.Join(dir, HandledFile), now, now)
 	}
-	return "@branch-" + k
+}
+
+func handledRecently(dir string) bool {
+	fi, err := os.Stat(filepath.Join(dir, HandledFile))
+	return err == nil && Now().Sub(fi.ModTime()) < 10*time.Second && Now().Sub(fi.ModTime()) > -10*time.Second
 }
 
 // DefaultBranches are the branch names PIN@branch refuses: origin's HEAD, main

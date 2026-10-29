@@ -15,7 +15,7 @@ Pins, decisions and recent prompts that survive context compaction in Claude Cod
 | `PIN:` | this session | dropped, and you see which |
 | `PIN!:` | this session | kept (and moved if `/clear` starts a new session id) |
 | `CARRY:` | the chat after the next `/clear`, once | injected, then gone; a handoff note |
-| `PIN@branch:` | every session on this branch; refused on the default branch (`main`, `master`, origin's HEAD) and detached HEAD | kept |
+| `PIN@branch:` | every session on this branch; refused on the default branch (`main`, `master`, origin's HEAD) and detached HEAD; pruned only once the branch is deleted | kept |
 | `PIN@repo:` | every session and branch of this repo; never pruned | kept |
 | `PIN@global:` | every repo | kept |
 
