@@ -23,10 +23,34 @@ On the first hook, `bin/agent-ledger` fetches the binary for your OS/arch from t
 |---|---|
 | `agent-ledger decide "<decision>" "<because>" "<rejected>"` | Append a decision (the `record-decision` skill tells the agent how) |
 | `agent-ledger status` | Show the ledger dir, pin count and token estimate |
+| `agent-ledger config` | Effective settings and where each came from |
+| `agent-ledger preview [source]` | Dry run of SessionStart (default `compact`) |
 | `agent-ledger inject` | Print the ledger as context (for CLIs without hooks, e.g. run at Codex session start) |
 | `agent-ledger hook <user-prompt-submit\|session-start\|session-end>` | Hook entry points; read the hook JSON on stdin, always exit 0 |
 
+## Configuration
+
+Layers, later wins: defaults < user `~/.config/agent-ledger/config.json` (`%APPDATA%` on Windows) < repo `.agent-ledger.json` (commit it to share with the team) < env `AGENT_LEDGER_<KEY>`.
+
+```json
+{ "key": "session", "clear": "drop", "prune_days": 30, "recent_prompts": 5, "decisions": 10, "budget_chars": 16000 }
+```
+
+| Key | Values | Meaning |
+|---|---|---|
+| `key` | `session` (default), `branch`, `repo` | Who shares a ledger: one chat, everyone on a branch, or the whole repo |
+| `clear` | `drop`, `keep` | On `/clear`: drop pins and show them, or re-inject pins and decisions. Default `drop` for `session`, `keep` otherwise |
+| `prune_days` | 0-36500 | Delete ledgers idle this long at startup; 0 = never |
+| `recent_prompts`, `decisions` | 0-100, 0-200 | How many are re-injected after compact |
+| `budget_chars` | 1000-400000 | Injection budget; pins are never cut |
+
+Bad files, unknown keys and invalid values are ignored; `agent-ledger config` shows each effective value, where it came from and any problem. `agent-ledger preview [compact|clear|startup|resume]` shows what the next SessionStart would inject, drop or prune, without doing it.
+
+`clear: keep` with `key: session` only helps if `/clear` keeps the session id (unverified).
+
 ## Keying
+
+With `key: session` (default):
 
 1. The hook's `session_id` (hooks), else `CLAUDE_SESSION_ID` (written to `CLAUDE_ENV_FILE` at session start), else `CLAUDE_CODE_SESSION_ID`.
 2. With no session id, the current git branch (`detached` for detached HEAD), so manual runs and other CLIs still work.

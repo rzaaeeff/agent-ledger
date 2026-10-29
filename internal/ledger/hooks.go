@@ -75,7 +75,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if h.Prompt == "" {
 		return
 	}
-	dir, err := Dir(h.Cwd, h.SessionID)
+	dir, err := DirFor(LoadConfig(h.Cwd), h.Cwd, h.SessionID)
 	if err != nil || MkdirPrivate(dir) != nil {
 		return
 	}
@@ -119,15 +119,16 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	}
 }
 
-// HookSessionStart prints what must survive a compaction: the session's pinned
+// HookSessionStart prints what must survive a compaction: the ledger's pinned
 // rules, last prompts and last decisions. By the hook's source:
 //
 //	compact  prints everything.
-//	clear    adds no context: the pins were dropped, so it only shows the user
-//	         which ones, once, as a systemMessage.
+//	clear    with clear=drop (default for key=session) adds no context: the pins
+//	         were dropped, so it only shows the user which ones, once, as a
+//	         systemMessage. With clear=keep it prints the pins and decisions.
 //	resume   prints nothing (the transcript is already loaded).
-//	startup  deletes this repo's ledgers idle for 30 days, then prints the (new,
-//	         usually empty) session's ledger.
+//	startup  deletes this repo's ledgers idle for prune_days, then prints the
+//	         ledger (for a new session usually empty).
 //
 // Any other or missing source prints everything, which is what a manual run (for
 // example from Codex, keyed by branch) wants. With a session id it also exports
@@ -143,23 +144,27 @@ func HookSessionStart(h HookInput, out io.Writer) {
 		return
 	}
 	debug(root, "SessionStart", h)
+	cfg := LoadConfig(h.Cwd)
+	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
+	if err != nil {
+		return
+	}
 	switch h.Source {
 	case "resume":
 		return
 	case "clear":
+		if cfg.Clear == "keep" {
+			cfg.RecentPrompts = 0
+			break
+		}
 		if h.SessionID != "" {
-			cleared(root, h, out)
+			cleared(cfg, root, dir, h, out)
 		}
 		return
+	case "startup":
+		Prune(root, dir, cfg.PruneDays)
 	}
-	dir, err := Dir(h.Cwd, h.SessionID)
-	if err != nil {
-		return
-	}
-	if h.Source == "startup" {
-		Prune(root, dir)
-	}
-	if text := Compose(dir); text != "" {
+	if text := Compose(dir, cfg); text != "" {
 		fmt.Fprintln(out, text)
 	}
 }
@@ -187,9 +192,9 @@ func tail[T any](xs []T, n int) []T {
 	return xs
 }
 
-// Compose builds the context block for the ledger in dir, within Budget: over it,
-// the oldest recent prompts go first, then the oldest decisions. Never pins.
-func Compose(dir string) string {
+// Compose builds the context block for the ledger in dir, within cfg.BudgetChars:
+// over it, the oldest recent prompts go first, then the oldest decisions. Never pins.
+func Compose(dir string, cfg Config) string {
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		return ""
 	}
@@ -203,7 +208,7 @@ func Compose(dir string) string {
 	decisions := readJSONLFrom[Decision](filepath.Join(dir, DecisionsFile), mark.Decisions)
 
 	var recent, decs string
-	for r, d := RecentPrompts, RecentDecs; ; {
+	for r, d := cfg.RecentPrompts, cfg.Decisions; ; {
 		var rl, dl []string
 		for _, p := range tail(prompts, r) {
 			text, was := cut(p.Prompt, PromptMax)
@@ -217,7 +222,7 @@ func Compose(dir string) string {
 			dl = append(dl, fmt.Sprintf("- DECISION: %s\n  BECAUSE: %s\n  REJECTED: %s", x.Decision, x.Because, x.Rejected))
 		}
 		recent, decs = strings.Join(rl, "\n"), strings.Join(dl, "\n")
-		if runes(pins)+runes(recent)+runes(decs) <= Budget {
+		if runes(pins)+runes(recent)+runes(decs) <= cfg.BudgetChars {
 			break
 		}
 		if r > 1 {
@@ -251,13 +256,11 @@ func Compose(dir string) string {
 // cleared runs on SessionStart after /clear: drops this session's pins if
 // SessionEnd has not yet (same session id), then tells the user which pins the
 // clear dropped. Nothing goes to the model.
-func cleared(root string, h HookInput, out io.Writer) {
-	dir, err := Dir(h.Cwd, h.SessionID)
-	if err != nil {
-		return
-	}
+func cleared(cfg Config, root, dir string, h HookInput, out io.Writer) {
 	_, statErr := os.Stat(dir)
-	isNew := statErr != nil
+	// A shared (branch or repo) ledger exists already, so a new session id cannot be
+	// told apart by a missing dir: allow the same-cwd note.
+	isNew := statErr != nil || cfg.Key != KeySession
 	if !isNew {
 		markCleared(dir)
 	}
@@ -278,8 +281,8 @@ func cleared(root string, h HookInput, out io.Writer) {
 		len(note.Pins), filepath.Join(note.Dir, ClearedFile), strings.Join(lines, "\n")))
 }
 
-// HookSessionEnd drops the session's pins on /clear (reason "clear"), so a cleared
-// chat starts without them; other reasons keep them. Prints nothing and does only
+// HookSessionEnd drops the session's pins on /clear (reason "clear") when
+// clear=drop, so a cleared chat starts without them; other reasons keep them. Prints nothing and does only
 // one small file move: SessionEnd hooks get little time.
 func HookSessionEnd(h HookInput) {
 	root, err := Root(h.Cwd)
@@ -290,7 +293,11 @@ func HookSessionEnd(h HookInput) {
 	if h.Reason != "clear" || h.SessionID == "" {
 		return
 	}
-	if dir, err := Dir(h.Cwd, h.SessionID); err == nil {
+	cfg := LoadConfig(h.Cwd)
+	if cfg.Clear != "drop" {
+		return
+	}
+	if dir, err := DirFor(cfg, h.Cwd, h.SessionID); err == nil {
 		markCleared(dir)
 		_ = ClearPins(dir, root, h.SessionID, h.Cwd)
 	}

@@ -96,11 +96,22 @@ func SessionFromEnv() string {
 	return os.Getenv("CLAUDE_CODE_SESSION_ID")
 }
 
-// Dir is the ledger of session sid (default: SessionFromEnv) in the repo of cwd.
-// The branch and worktree do not matter, so one chat keeps one ledger when it
-// enters a worktree. Without a session id (Codex, manual runs) it falls back to the
-// branch of cwd ("detached" for a detached HEAD).
+// Dir is the ledger for cwd and session sid under the config of cwd; see DirFor.
 func Dir(cwd, sid string) (string, error) {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	return DirFor(LoadConfig(cwd), cwd, sid)
+}
+
+// DirFor is the ledger in the repo of cwd chosen by cfg.Key:
+//
+//	session  session sid (default: SessionFromEnv). The branch and worktree do not
+//	         matter, so one chat keeps one ledger when it enters a worktree. Without
+//	         a session id (Codex, manual runs) it falls back to the branch.
+//	branch   the branch of cwd ("detached" for a detached HEAD).
+//	repo     one ledger (RepoKey) for the whole repo.
+func DirFor(cfg Config, cwd, sid string) (string, error) {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
@@ -108,10 +119,17 @@ func Dir(cwd, sid string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	key := sid
-	if key == "" {
-		key = SessionFromEnv()
+	switch cfg.Key {
+	case KeyRepo:
+		return filepath.Join(root, RepoKey), nil
+	case KeyBranch:
+		sid = ""
+	default:
+		if sid == "" {
+			sid = SessionFromEnv()
+		}
 	}
+	key := sid
 	if key == "" {
 		key, _ = git(cwd, "branch", "--show-current")
 		if key == "" {
