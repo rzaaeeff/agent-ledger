@@ -22,14 +22,30 @@ func Preview(cfg Config, cwd, sid, source string) (string, error) {
 		return b.String(), nil
 	case "clear":
 		if cfg.Clear == "drop" {
-			pins := ReadJSONL[Pin](filepath.Join(dir, PinnedFile))
-			if len(pins) == 0 {
-				b.WriteString("Nothing is injected and no pins would be dropped.")
-				return b.String(), nil
+			var drop, kept, carry []Pin
+			for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
+				switch p.Life {
+				case LifeKeep:
+					kept = append(kept, p)
+				case LifeCarry:
+					carry = append(carry, p)
+				default:
+					drop = append(drop, p)
+				}
 			}
-			fmt.Fprintf(&b, "Nothing is injected. You would see that /clear dropped %d pin(s):\n", len(pins))
-			for _, p := range pins {
-				fmt.Fprintf(&b, "- [%s] %s\n", p.ID, p.Text)
+			for _, part := range []struct {
+				pins []Pin
+				what string
+			}{{drop, "You would see that /clear dropped"}, {kept, "Kept across /clear (PIN!)"}, {carry, "Carried into the new chat once (CARRY)"}} {
+				if len(part.pins) > 0 {
+					fmt.Fprintf(&b, "%s %d pin(s):\n%s\n", part.what, len(part.pins), strings.Join(pinLines(part.pins, false), "\n"))
+				}
+			}
+			if s := strings.TrimLeft(scopedSections(cwd, dir), "\n"); s != "" {
+				b.WriteString("Scoped pins injected after /clear:\n" + s + "\n")
+			}
+			if len(drop)+len(kept)+len(carry) == 0 && !strings.Contains(b.String(), "Scoped") {
+				b.WriteString("Nothing is injected and no pins would be dropped.")
 			}
 			return strings.TrimRight(b.String(), "\n"), nil
 		}
@@ -45,7 +61,7 @@ func Preview(cfg Config, cwd, sid, source string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown source %q (want compact|clear|startup|resume)", source)
 	}
-	text := Compose(dir, cfg)
+	text := Compose(cwd, dir, cfg)
 	if text == "" {
 		b.WriteString("Nothing would be injected (empty ledger).")
 		return b.String(), nil
