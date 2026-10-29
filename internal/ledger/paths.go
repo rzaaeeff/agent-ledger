@@ -88,12 +88,15 @@ func Root(cwd string) (string, error) {
 
 // SessionFromEnv is the session id for callers without hook JSON (decide, status):
 // $CLAUDE_SESSION_ID, which the SessionStart hook exports from the hook JSON through
-// $CLAUDE_ENV_FILE, then the undocumented $CLAUDE_CODE_SESSION_ID.
+// $CLAUDE_ENV_FILE, then the undocumented $CLAUDE_CODE_SESSION_ID, then Codex's
+// $CODEX_THREAD_ID (the same id its hooks get as session_id).
 func SessionFromEnv() string {
-	if v := os.Getenv("CLAUDE_SESSION_ID"); v != "" {
-		return v
+	for _, k := range []string{"CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"} {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
 	}
-	return os.Getenv("CLAUDE_CODE_SESSION_ID")
+	return ""
 }
 
 // Dir is the ledger for cwd and session sid under the config of cwd; see DirFor.

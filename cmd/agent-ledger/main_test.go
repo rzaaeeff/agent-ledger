@@ -28,7 +28,7 @@ func setup(t *testing.T) *env {
 	t.Setenv("XDG_STATE_HOME", state)
 	// Run from inside Claude Code these would select its session; the tests set their own.
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(state, "config"))
-	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_ENV_FILE", "AGENT_LEDGER_DEBUG",
+	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_ENV_FILE", "AGENT_LEDGER_DEBUG",
 		"AGENT_LEDGER_KEY", "AGENT_LEDGER_CLEAR", "AGENT_LEDGER_PRUNE_DAYS", "AGENT_LEDGER_RECENT_PROMPTS",
 		"AGENT_LEDGER_DECISIONS", "AGENT_LEDGER_BUDGET_CHARS"} {
 		t.Setenv(k, "")
@@ -234,6 +234,11 @@ func TestKeyedBySession(t *testing.T) {
 	}
 	t.Setenv("CLAUDE_SESSION_ID", "")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+	t.Setenv("CODEX_THREAD_ID", "s2")
+	if out, _, _ := cli(nil, "status"); out != want {
+		t.Errorf("CODEX_THREAD_ID=s2 status = %q", out)
+	}
+	t.Setenv("CODEX_THREAD_ID", "")
 
 	e.say("hostile", "../../../x;$(touch pwned)/..")
 	if !exists(filepath.Join(e.root, "_.._.._x___touch_pwned__..", "prompts.jsonl")) {
