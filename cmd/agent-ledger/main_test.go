@@ -700,3 +700,244 @@ func TestPreview(t *testing.T) {
 		t.Errorf("recent_prompts=0 must re-inject no prompts:\n%s", out)
 	}
 }
+
+// hookOut splits a SessionStart(clear) JSON into its user message and model context.
+func hookOut(t *testing.T, out string) (msg, ctx string) {
+	t.Helper()
+	if out == "" {
+		return "", ""
+	}
+	var v struct {
+		SystemMessage string `json:"systemMessage"`
+		Hook          struct {
+			Event   string `json:"hookEventName"`
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("not JSON: %q", out)
+	}
+	if v.Hook.Context != "" && v.Hook.Event != "SessionStart" {
+		t.Errorf("additionalContext without hookEventName SessionStart: %q", out)
+	}
+	return v.SystemMessage, v.Hook.Context
+}
+
+func TestPinScopes(t *testing.T) {
+	e := setup(t)
+	if msg := sysMsg(t, e.say("PIN@branch: no", "s1")); !strings.Contains(msg, "refused on main") {
+		t.Errorf("PIN@branch on main: %q", msg)
+	}
+	e.checkout("--detach")
+	if msg := sysMsg(t, e.say("PIN@branch: no", "s1")); !strings.Contains(msg, "refused on a detached HEAD") {
+		t.Errorf("PIN@branch detached: %q", msg)
+	}
+	e.checkout("-b", "feat")
+	if msg := sysMsg(t, e.say("PIN@branch: feat rule", "s1")); !strings.Contains(msg, "for branch feat") {
+		t.Errorf("PIN@branch: %q", msg)
+	}
+	e.say("PIN@repo: repo rule", "s1")
+	e.say("PIN@global: global rule", "s1")
+	e.say("PIN: session rule", "s1")
+	if out, _, _ := cli(nil, "status"); !strings.Contains(out, "scoped pins: branch feat 1 | repo 1 | global 1") {
+		t.Errorf("status must count scoped pins:\n%s", out)
+	}
+
+	out := e.inject("compact", "s2")
+	for _, want := range []string{"Pinned for branch feat", "feat rule", "repo rule", "global rule"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("another session on feat lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "session rule") || strings.Contains(out, "PIN@branch: no") {
+		t.Errorf("session pins or refused pins leaked:\n%s", out)
+	}
+	e.checkout("main")
+	if out := e.inject("compact", "s3"); strings.Contains(out, "feat rule") || !strings.Contains(out, "repo rule") {
+		t.Errorf("main must see repo pins but not feat's:\n%s", out)
+	}
+	other := filepath.Join(t.TempDir(), "other")
+	e.git("init", "-q", "-b", "main", other)
+	out, _, _ = cli(m{"cwd": other, "source": "compact", "session_id": "s9"}, "hook", "session-start")
+	if !strings.Contains(out, "global rule") || strings.Contains(out, "repo rule") {
+		t.Errorf("another repo must see only global pins:\n%s", out)
+	}
+
+	// Same text in two scopes: two ids; UNPIN by text is ambiguous, by id exact.
+	e.say("PIN: shared text", "s3")
+	e.say("PIN@repo: shared text", "s3")
+	if msg := sysMsg(t, e.say("UNPIN: shared text", "s3")); !strings.Contains(msg, "matched 2") {
+		t.Errorf("ambiguous cross-scope UNPIN: %q", msg)
+	}
+	var repoID string
+	for _, l := range lines(t, filepath.Join(e.root, "@repo", "pinned.jsonl")) {
+		if strings.Contains(l, "shared text") {
+			var p map[string]string
+			json.Unmarshal([]byte(l), &p)
+			repoID = p["id"]
+		}
+	}
+	if msg := sysMsg(t, e.say("UNPIN: "+repoID, "s3")); !strings.Contains(msg, "unpinned") {
+		t.Errorf("UNPIN by repo id: %q", msg)
+	}
+	if out := e.inject("compact", "s3"); strings.Count(strings.Split(out, "### Last prompts")[0], "shared text") != 1 {
+		t.Errorf("UNPIN by id must remove only the repo pin:\n%s", out)
+	}
+	if msg := sysMsg(t, e.say("UNPIN: global rule", "s3")); !strings.Contains(msg, "unpinned") {
+		t.Errorf("UNPIN of a global pin: %q", msg)
+	}
+
+	// The repo pins are never idle-pruned.
+	past := time.Now().Add(-90 * 24 * time.Hour)
+	filepath.WalkDir(filepath.Join(e.root, "@repo"), func(p string, _ os.DirEntry, _ error) error { return os.Chtimes(p, past, past) })
+	e.inject("startup", "s4")
+	if !exists(filepath.Join(e.root, "@repo", "pinned.jsonl")) {
+		t.Error("startup pruned the repo pins")
+	}
+}
+
+func TestPinLifetimes(t *testing.T) {
+	e := setup(t)
+	e.say("PIN: plain rule", "s1")
+	if msg := sysMsg(t, e.say("PIN!: sticky rule", "s1")); !strings.Contains(msg, "kept across /clear") {
+		t.Errorf("PIN!: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("CARRY: next, write the tests", "s1")); !strings.Contains(msg, "after the next /clear") {
+		t.Errorf("CARRY: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("CARRY@repo: x", "s1")); !strings.Contains(msg, "takes no scope") {
+		t.Errorf("CARRY@repo: %q", msg)
+	}
+	if out := e.inject("compact", "s1"); !strings.Contains(out, "sticky rule (kept across /clear)") || strings.Contains(out, "- [") && strings.Contains(strings.Split(out, "### Last prompts")[0], "write the tests") {
+		t.Errorf("compact: PIN! tagged, CARRY not yet injected:\n%s", out)
+	}
+
+	// /clear keeping the id, SessionEnd first.
+	cli(e.end("clear", "s1"), "hook", "session-end")
+	msg, ctx := hookOut(t, e.inject("clear", "s1"))
+	for _, want := range []string{"dropped 1 pin", "plain rule", "kept 1 PIN!", "carried 1"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("clear message lacks %q: %q", want, msg)
+		}
+	}
+	if strings.Contains(msg, "sticky rule") || !strings.Contains(ctx, "sticky rule") || !strings.Contains(ctx, "write the tests") || strings.Contains(ctx, "plain rule") {
+		t.Errorf("clear context must hold the kept pin and the carry only: %q", ctx)
+	}
+	out := e.inject("compact", "s1")
+	if !strings.Contains(out, "sticky rule") || strings.Contains(out, "plain rule") || strings.Contains(out, "write the tests") {
+		t.Errorf("compact after clear: kept pin only:\n%s", out)
+	}
+	cli(e.end("clear", "s1"), "hook", "session-end")
+	if msg, ctx := hookOut(t, e.inject("clear", "s1")); strings.Contains(msg, "carried") || strings.Contains(ctx, "write the tests") || !strings.Contains(ctx, "sticky rule") {
+		t.Errorf("a second clear: carry is one-shot, the kept pin stays: %q %q", msg, ctx)
+	}
+
+	// /clear with a new id, SessionStart only (SessionEnd late or missing): the
+	// kept pin moves to the new session.
+	e.say("CARRY: handoff two", "s2")
+	e.say("PIN!: sticky two", "s2")
+	cli(e.end("clear", "s2"), "hook", "session-end")
+	msg, ctx = hookOut(t, e.inject("clear", "s3"))
+	if !strings.Contains(ctx, "handoff two") || !strings.Contains(ctx, "sticky two") || !strings.Contains(msg, "kept 1") {
+		t.Errorf("new id after clear: %q %q", msg, ctx)
+	}
+	if out := e.inject("compact", "s3"); !strings.Contains(out, "sticky two") {
+		t.Errorf("the kept pin must live in the new session:\n%s", out)
+	}
+
+	// SessionStart(clear) before SessionEnd, same id.
+	e.say("PIN: p4", "s4")
+	e.say("PIN!: k4", "s4")
+	msg, ctx = hookOut(t, e.inject("clear", "s4"))
+	cli(e.end("clear", "s4"), "hook", "session-end")
+	if !strings.Contains(msg, "p4") || !strings.Contains(ctx, "k4") {
+		t.Errorf("start-before-end: %q %q", msg, ctx)
+	}
+	if out, _, _ := cli(e.start("clear", "s4"), "hook", "session-start"); strings.Contains(out, "p4") {
+		t.Errorf("dropped list shown twice: %q", out)
+	}
+
+	// clear=keep: CARRY still lands once.
+	t.Setenv("AGENT_LEDGER_CLEAR", "keep")
+	e.say("CARRY: keep-mode handoff", "s5")
+	if out := e.inject("clear", "s5"); !strings.Contains(out, "keep-mode handoff") {
+		t.Errorf("clear=keep must inject the carry:\n%s", out)
+	}
+	if out := e.inject("clear", "s5"); strings.Contains(out, "keep-mode handoff") {
+		t.Errorf("clear=keep carry is one-shot:\n%s", out)
+	}
+
+	t.Setenv("AGENT_LEDGER_CLEAR", "")
+	t.Setenv("CLAUDE_SESSION_ID", "s6")
+	e.say("PIN!: k6", "s6")
+	e.say("CARRY: c6", "s6")
+	if out, _, _ := cli(nil, "preview", "clear"); !strings.Contains(out, "Kept across /clear (PIN!) 1") || !strings.Contains(out, "CARRY) 1") {
+		t.Errorf("preview clear lifetimes:\n%s", out)
+	}
+}
+
+func TestPinScopeReviewFixes(t *testing.T) {
+	e := setup(t)
+	// 1. key=repo: PIN@repo lives in the ledger itself and survives /clear.
+	t.Setenv("AGENT_LEDGER_KEY", "repo")
+	t.Setenv("AGENT_LEDGER_CLEAR", "drop")
+	e.say("PIN@repo: repo stays", "s1")
+	e.say("PIN: plain goes", "s1")
+	cli(e.end("clear", "s1"), "hook", "session-end")
+	msg, ctx := hookOut(t, e.inject("clear", "s1"))
+	if strings.Contains(msg, "repo stays") || !strings.Contains(ctx, "repo stays") || !strings.Contains(msg, "plain goes") {
+		t.Errorf("key=repo PIN@repo must survive /clear: %q %q", msg, ctx)
+	}
+	t.Setenv("AGENT_LEDGER_KEY", "")
+	t.Setenv("AGENT_LEDGER_CLEAR", "")
+
+	// 2. clear=keep, new id: CARRY is handed over by SessionEnd.
+	t.Setenv("AGENT_LEDGER_CLEAR", "keep")
+	e.say("CARRY: handoff across ids", "k1")
+	cli(e.end("clear", "k1"), "hook", "session-end")
+	if out := e.inject("clear", "k2"); !strings.Contains(out, "handoff across ids") {
+		t.Errorf("clear=keep new id lost the carry:\n%s", out)
+	}
+	t.Setenv("AGENT_LEDGER_CLEAR", "")
+
+	// 3. SessionStart before SessionEnd: no orphan note left behind.
+	e.say("PIN!: only kept", "o1")
+	e.inject("clear", "o1")
+	cli(e.end("clear", "o1"), "hook", "session-end")
+	if exists(filepath.Join(e.root, ".cleared.jsonl")) {
+		data, _ := os.ReadFile(filepath.Join(e.root, ".cleared.jsonl"))
+		t.Errorf("orphan note after start-then-end: %s", data)
+	}
+
+	// 4. Branches that sanitise alike keep separate pins.
+	e.checkout("-b", "feat/x")
+	e.say("PIN@branch: slash", "b1")
+	e.checkout("main")
+	e.checkout("-b", "feat_x")
+	if out := e.inject("compact", "b2"); strings.Contains(out, "slash") {
+		t.Errorf("feat_x sees feat/x's pins:\n%s", out)
+	}
+
+	// 5. Idle branch pins are pruned only once the branch is gone.
+	past := time.Now().Add(-90 * 24 * time.Hour)
+	age := func() {
+		filepath.WalkDir(e.root, func(p string, d os.DirEntry, _ error) error {
+			if strings.Contains(p, "@branch-") {
+				os.Chtimes(p, past, past)
+			}
+			return nil
+		})
+	}
+	count := func() int { m, _ := filepath.Glob(filepath.Join(e.root, "@branch-*")); return len(m) }
+	age()
+	e.inject("startup", "p1")
+	if count() != 1 {
+		t.Fatalf("idle pins of an existing branch were pruned (%d stores)", count())
+	}
+	e.git("-C", e.repo, "branch", "-D", "feat/x")
+	age()
+	e.inject("startup", "p2")
+	if count() != 0 {
+		t.Errorf("pins of a deleted idle branch must be pruned (%d stores)", count())
+	}
+}

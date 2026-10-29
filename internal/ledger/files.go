@@ -24,6 +24,7 @@ type Pin struct {
 	ID   string `json:"id"`
 	TS   string `json:"ts,omitempty"`
 	Text string `json:"text"`
+	Life string `json:"life,omitempty"` // "" | keep (PIN!) | carry (CARRY)
 }
 
 // Prompt is one logged user prompt.

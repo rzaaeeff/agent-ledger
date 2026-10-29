@@ -93,11 +93,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 0
 		}
 		warnFallback(stderr)
+		cwd, _ := os.Getwd()
 		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 			fmt.Fprintf(stdout, "ledger: empty (%s)\n", dir)
-			return 0
+		} else {
+			fmt.Fprintln(stdout, ledger.Status(dir))
 		}
-		fmt.Fprintln(stdout, ledger.Status(dir))
+		if s := ledger.ScopeStatus(cwd, dir); s != "" {
+			fmt.Fprintln(stdout, s)
+		}
 		return 0
 	case "config":
 		cwd, _ := os.Getwd()

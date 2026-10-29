@@ -1,8 +1,6 @@
 package ledger
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,9 +63,15 @@ func debug(root, event string, h HookInput) {
 
 // HookUserPromptSubmit logs every prompt and keeps the pinned rules:
 //
-//	PIN: <text>      stores <text> in pinned.jsonl; re-injected on every compact of
-//	                 this session, dropped (and shown to the user) on /clear
-//	UNPIN: <id|text> removes the pin with that id, or the only one containing the text
+//	PIN: <text>        stores <text> in this ledger; re-injected on every compact,
+//	                   dropped (and shown to the user) on /clear
+//	PIN!: <text>       the same, but kept across /clear
+//	CARRY: <text>      injected once, right after the next /clear (a handoff)
+//	PIN@branch: <text> for every session on this branch (refused on the default branch)
+//	PIN@repo: <text>   for every session and branch of this repo
+//	PIN@global: <text> for every repo
+//	UNPIN: <id|text>   removes the pin with that id, or the only one containing the
+//	                   text, from any of those stores
 //
 // Plain stdout would reach the model, so it prints only a systemMessage JSON (shown
 // to the user) after PIN:/UNPIN:. Problems go to errors.log.
@@ -83,30 +87,58 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if Append(filepath.Join(dir, PromptsFile), Marshal(Prompt{ts, h.SessionID, h.Prompt})) != nil {
 		LogError(dir, "prompts append failed")
 	}
-	pins := filepath.Join(dir, PinnedFile)
-	switch {
-	case strings.HasPrefix(h.Prompt, "PIN:"):
-		text := strings.TrimSpace(strings.TrimPrefix(h.Prompt, "PIN:"))
-		if text == "" {
+	cmd, ok := parsePin(h.Prompt)
+	if !ok || cmd.text == "" {
+		return
+	}
+	switch cmd.verb {
+	case "PIN", "CARRY":
+		target, where := dir, ""
+		life := ""
+		switch {
+		case cmd.verb == "CARRY" && (cmd.scope != "" || cmd.keep):
+			emit(out, "CARRY takes no scope or '!': it hands this session's text to the chat after the next /clear.")
 			return
+		case cmd.verb == "CARRY":
+			life, where = LifeCarry, " for the chat after the next /clear"
+		case cmd.scope == "" && cmd.keep:
+			life, where = LifeKeep, " (kept across /clear)"
+		case cmd.scope == ScopeBranch:
+			b, _ := git(h.Cwd, "branch", "--show-current")
+			if b == "" || DefaultBranches(h.Cwd)[b] {
+				name := b
+				if name == "" {
+					name = "a detached HEAD"
+				}
+				emit(out, fmt.Sprintf("PIN@branch refused on %s (the default branch never keeps pins). Use PIN: for this session or PIN@repo: for the repo.", name))
+				return
+			}
+			target, where = filepath.Join(filepath.Dir(dir), branchKey(b)), " for branch "+b
+		case cmd.scope == ScopeRepo:
+			target, where = filepath.Join(filepath.Dir(dir), RepoKey), " for this repo"
+		case cmd.scope == ScopeGlobal:
+			target, where = GlobalDir(), " for every repo"
 		}
-		sum := sha1.Sum([]byte(text))
-		id := hex.EncodeToString(sum[:])[:6]
-		if Append(pins, Marshal(Pin{id, ts, text})) != nil {
+		scope := cmd.scope
+		if cmd.scope != "" && filepath.Clean(target) == filepath.Clean(dir) {
+			// key=repo: the repo pins live in the ledger itself; keep them on /clear.
+			scope, life = "", LifeKeep
+		}
+		if cmd.scope == ScopeBranch && MkdirPrivate(target) == nil {
+			b, _ := git(h.Cwd, "branch", "--show-current")
+			_ = writeReplace(filepath.Join(target, BranchNameFile), []byte(b+"\n"))
+		}
+		id := pinID(scope, cmd.text)
+		if MkdirPrivate(target) != nil || Append(filepath.Join(target, PinnedFile), Marshal(Pin{id, ts, cmd.text, life})) != nil {
 			LogError(dir, "pinned append failed")
 		}
-		emit(out, fmt.Sprintf("pinned [%s]. %s", id, Status(dir)))
-	case strings.HasPrefix(h.Prompt, "UNPIN:"):
-		text := strings.TrimSpace(strings.TrimPrefix(h.Prompt, "UNPIN:"))
-		if text == "" {
-			return
-		}
-		if _, err := os.Stat(pins); err != nil {
-			emit(out, "UNPIN did nothing: no pins. "+Status(dir))
-			return
-		}
-		hits, err := Unpin(pins, text)
+		emit(out, fmt.Sprintf("pinned [%s]%s. %s", id, where, Status(dir)))
+	case "UNPIN":
+		text := cmd.text
+		hits, err := UnpinAny(h.Cwd, dir, text)
 		switch {
+		case err == nil && hits == 0:
+			emit(out, "UNPIN did nothing: no pins match. "+Status(dir))
 		case err != nil:
 			LogError(dir, "unpin failed")
 			emit(out, "UNPIN failed, see "+filepath.Join(dir, ErrorsFile))
@@ -157,14 +189,31 @@ func HookSessionStart(h HookInput, out io.Writer) {
 			cfg.RecentPrompts = 0
 			break
 		}
+		markHandled(dir)
 		if h.SessionID != "" {
 			cleared(cfg, root, dir, h, out)
 		}
 		return
 	case "startup":
-		Prune(root, dir, cfg.PruneDays)
+		Prune(h.Cwd, root, dir, cfg.PruneDays)
 	}
-	if text := Compose(dir, cfg); text != "" {
+	if h.Source == "clear" {
+		// clear=keep: no prompts, plus the CARRY handoff, once.
+		text := Compose(h.Cwd, dir, cfg)
+		c := takeCarry(dir)
+		_, statErr := os.Stat(dir)
+		if note := TakeCleared(root, h.SessionID, h.Cwd, statErr != nil || cfg.Key != KeySession); note != nil {
+			c = append(c, note.Carry...)
+		}
+		if len(c) > 0 {
+			text = strings.TrimLeft(text+"\n### Carried over from before /clear (once)\n"+strings.Join(pinLines(c, false), "\n"), "\n")
+		}
+		if text != "" {
+			fmt.Fprintln(out, text)
+		}
+		return
+	}
+	if text := Compose(h.Cwd, dir, cfg); text != "" {
 		fmt.Fprintln(out, text)
 	}
 }
@@ -194,15 +243,9 @@ func tail[T any](xs []T, n int) []T {
 
 // Compose builds the context block for the ledger in dir, within cfg.BudgetChars:
 // over it, the oldest recent prompts go first, then the oldest decisions. Never pins.
-func Compose(dir string, cfg Config) string {
-	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-		return ""
-	}
-	var pinLines []string
-	for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
-		pinLines = append(pinLines, fmt.Sprintf("- [%s] %s", p.ID, p.Text))
-	}
-	pins := strings.Join(pinLines, "\n")
+func Compose(cwd, dir string, cfg Config) string {
+	pins := strings.Join(pinLines(sessionPins(dir), true), "\n")
+	scoped := scopedSections(cwd, dir)
 	mark := readMark(dir)
 	prompts := readJSONLFrom[Prompt](filepath.Join(dir, PromptsFile), mark.Prompts)
 	decisions := readJSONLFrom[Decision](filepath.Join(dir, DecisionsFile), mark.Decisions)
@@ -222,7 +265,7 @@ func Compose(dir string, cfg Config) string {
 			dl = append(dl, fmt.Sprintf("- DECISION: %s\n  BECAUSE: %s\n  REJECTED: %s", x.Decision, x.Because, x.Rejected))
 		}
 		recent, decs = strings.Join(rl, "\n"), strings.Join(dl, "\n")
-		if runes(pins)+runes(recent)+runes(decs) <= cfg.BudgetChars {
+		if runes(pins)+runes(scoped)+runes(recent)+runes(decs) <= cfg.BudgetChars {
 			break
 		}
 		if r > 1 {
@@ -233,7 +276,7 @@ func Compose(dir string, cfg Config) string {
 			break
 		}
 	}
-	if pins+recent+decs == "" {
+	if pins+scoped+recent+decs == "" {
 		return ""
 	}
 	var b strings.Builder
@@ -241,7 +284,8 @@ func Compose(dir string, cfg Config) string {
 	if pins != "" {
 		b.WriteString("\n### Pinned by the user (standing rules and concerns, verbatim)\n" + pins)
 	}
-	if runes(pins) > PinWarnChars {
+	b.WriteString(scoped)
+	if runes(pins)+runes(scoped) > PinWarnChars {
 		b.WriteString("\nWARNING: pinned items exceed 2k tokens; UNPIN: <id> the ones that no longer apply.")
 	}
 	if recent != "" {
@@ -266,19 +310,58 @@ func cleared(cfg Config, root, dir string, h HookInput, out io.Writer) {
 	}
 	_ = ClearPins(dir, root, h.SessionID, h.Cwd)
 	note := TakeCleared(root, h.SessionID, h.Cwd, isNew)
-	if note == nil {
+	var msg, ctx []string
+	if note != nil {
+		// PIN! pins stay in place for the same session; a new id gets a copy.
+		if len(note.Kept) > 0 && filepath.Clean(note.Dir) != filepath.Clean(dir) && MkdirPrivate(dir) == nil {
+			have := map[string]bool{}
+			for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
+				have[p.ID] = true
+			}
+			for _, p := range note.Kept {
+				if !have[p.ID] {
+					_ = Append(filepath.Join(dir, PinnedFile), Marshal(p))
+				}
+			}
+		}
+		if len(note.Pins) > 0 {
+			var lines []string
+			for _, p := range note.Pins {
+				text, was := cut(p.Text, 300)
+				if was {
+					text += "..."
+				}
+				lines = append(lines, fmt.Sprintf("- [%s] %s", p.ID, text))
+			}
+			msg = append(msg, fmt.Sprintf("ledger: /clear dropped %d pin(s); PIN: again any that still apply (archived in %s):\n%s",
+				len(note.Pins), filepath.Join(note.Dir, ClearedFile), strings.Join(lines, "\n")))
+		}
+		if len(note.Kept) > 0 {
+			msg = append(msg, fmt.Sprintf("ledger: kept %d PIN! pin(s) across /clear.", len(note.Kept)))
+		}
+		if len(note.Carry) > 0 {
+			msg = append(msg, fmt.Sprintf("ledger: carried %d item(s) into this chat.", len(note.Carry)))
+			ctx = append(ctx, "### Carried over from before /clear (once)\n"+strings.Join(pinLines(note.Carry, false), "\n"))
+		}
+	}
+	if pins := pinLines(sessionPins(dir), true); len(pins) > 0 {
+		ctx = append([]string{"### Pinned by the user (standing rules and concerns, verbatim)\n" + strings.Join(pins, "\n")}, ctx...)
+	}
+	if s := strings.TrimLeft(scopedSections(h.Cwd, dir), "\n"); s != "" {
+		ctx = append(ctx, s)
+	}
+	if len(msg) == 0 && len(ctx) == 0 {
 		return
 	}
-	var lines []string
-	for _, p := range note.Pins {
-		text, was := cut(p.Text, 300)
-		if was {
-			text += "..."
-		}
-		lines = append(lines, fmt.Sprintf("- [%s] %s", p.ID, text))
+	v := map[string]any{}
+	if len(msg) > 0 {
+		v["systemMessage"] = strings.Join(msg, "\n")
 	}
-	emit(out, fmt.Sprintf("ledger: /clear dropped %d pin(s); PIN: again any that still apply (archived in %s):\n%s",
-		len(note.Pins), filepath.Join(note.Dir, ClearedFile), strings.Join(lines, "\n")))
+	if len(ctx) > 0 {
+		v["hookSpecificOutput"] = map[string]string{"hookEventName": "SessionStart",
+			"additionalContext": "## Agent ledger (after /clear)\n" + strings.Join(ctx, "\n")}
+	}
+	fmt.Fprintf(out, "%s\n", Marshal(v))
 }
 
 // HookSessionEnd drops the session's pins on /clear (reason "clear") when
@@ -294,11 +377,20 @@ func HookSessionEnd(h HookInput) {
 		return
 	}
 	cfg := LoadConfig(h.Cwd)
-	if cfg.Clear != "drop" {
+	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
+	if err != nil || handledRecently(dir) {
 		return
 	}
-	if dir, err := DirFor(cfg, h.Cwd, h.SessionID); err == nil {
-		markCleared(dir)
-		_ = ClearPins(dir, root, h.SessionID, h.Cwd)
+	if cfg.Clear != "drop" {
+		// clear=keep: only hand the CARRY items over, in case /clear changes the id.
+		if c := takeCarry(dir); len(c) > 0 {
+			now := Now()
+			_ = Append(filepath.Join(root, NotesFile), Marshal(Note{
+				N: fmt.Sprintf("%s.%d.%d", h.SessionID, now.UnixNano(), os.Getpid()), Session: h.SessionID,
+				Cwd: h.Cwd, Dir: dir, Epoch: now.Unix(), Carry: c}))
+		}
+		return
 	}
+	markCleared(dir)
+	_ = ClearPins(dir, root, h.SessionID, h.Cwd)
 }

@@ -2,11 +2,24 @@
 
 Pins, decisions and recent prompts that survive context compaction in Claude Code, scoped to **one session**.
 
-- `PIN: <text>` in any prompt stores the text verbatim. `UNPIN: <id or text>` removes it.
+- `PIN: <text>` at the start of a prompt stores the text verbatim. `UNPIN: <id or text>` removes it (from any scope).
 - After `/compact` (or auto-compact), pins, the last 5 prompts and the last 10 decisions are re-injected.
 - After `/clear`, nothing is re-injected. You see a short list of the pins that were dropped.
 - Session ledgers idle for 30 days are pruned at startup.
 - No dependencies: one static Go binary per OS, files under `~/.local/state/agent-ledger/<repo>-<hash>/<session>/` (0600). The hash of the repo path keeps same-named repos and submodules apart.
+
+## Pins: scope and lifetime
+
+| Prompt starts with | Seen by | On `/clear` |
+|---|---|---|
+| `PIN:` | this session | dropped, and you see which |
+| `PIN!:` | this session | kept (and moved if `/clear` starts a new session id) |
+| `CARRY:` | the chat after the next `/clear`, once | injected, then gone; a handoff note |
+| `PIN@branch:` | every session on this branch; refused on the default branch (`main`, `master`, origin's HEAD) and detached HEAD; pruned only once the branch is deleted | kept |
+| `PIN@repo:` | every session and branch of this repo; never pruned | kept |
+| `PIN@global:` | every repo | kept |
+
+After `/clear`, kept pins, carried notes and scoped pins reach the model as `additionalContext`; the dropped list goes only to you. `agent-ledger status` counts the scoped pins and `agent-ledger preview clear` shows what a `/clear` would drop, keep and carry.
 
 ## Install (Claude Code)
 
