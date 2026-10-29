@@ -120,15 +120,14 @@ func ClearPins(dir, root, sid, cwd string) error {
 // from the same session id, else, only for a session with no ledger yet (isNew:
 // /clear may have started a new id), those of the session that left the newest
 // note from the same cwd in the last 10 minutes.
-// Known limit: two brand-new sessions clearing in the same cwd within 10 minutes
-// can swap notes; accepted, as a note is only shown to the user. Notes older than
-// a day are dropped.
-func TakeCleared(root, sid, cwd string, isNew bool) *Note {
+// If notes of more than one other session qualify, it cannot tell which chat was
+// cleared and takes none (ambiguous reports it): kept pins reach the model, so a
+// guess could hand one chat's rules to another. Notes older than a day are dropped.
+func TakeCleared(root, sid, cwd string, isNew bool) (pick *Note, ambiguous bool) {
 	path := filepath.Join(root, NotesFile)
 	if _, err := os.Stat(path); err != nil {
-		return nil
+		return nil, false
 	}
-	var pick *Note
 	_ = withLock(path, func() error {
 		now := Now().Unix()
 		notes := ReadJSONL[Note](path)
@@ -139,10 +138,15 @@ func TakeCleared(root, sid, cwd string, isNew bool) *Note {
 			}
 		}
 		if from == "" && isNew {
+			seen := map[string]bool{}
 			for _, n := range notes {
 				if n.Cwd == cwd && n.Epoch > now-600 {
+					seen[n.Session] = true
 					from = n.Session
 				}
+			}
+			if len(seen) > 1 {
+				from, ambiguous = "", true
 			}
 		}
 		var keep []string
@@ -158,7 +162,7 @@ func TakeCleared(root, sid, cwd string, isNew bool) *Note {
 		}
 		return writeReplace(path, []byte(strings.Join(keep, "\n")+"\n"))
 	})
-	return pick
+	return pick, ambiguous
 }
 
 func mergeNote(into *Note, n Note) *Note {

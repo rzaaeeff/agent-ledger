@@ -34,7 +34,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 func warnFallback(stderr io.Writer) {
 	if ledger.LoadConfig("").Key == ledger.KeySession && ledger.SessionFromEnv() == "" {
-		fmt.Fprintln(stderr, "ledger: no session id (CLAUDE_SESSION_ID and CLAUDE_CODE_SESSION_ID unset); using the branch ledger")
+		fmt.Fprintln(stderr, "ledger: no session id (CLAUDE_SESSION_ID, CLAUDE_CODE_SESSION_ID and CODEX_THREAD_ID unset); using the branch ledger")
 	}
 }
 
@@ -82,7 +82,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			d.Because, _ = ledger.Redact(d.Because)
 			d.Rejected, _ = ledger.Redact(d.Rejected)
 		}
-		if err := ledger.MkdirPrivate(dir); err == nil {
+		if err = ledger.MkdirPrivate(dir); err == nil {
 			err = ledger.Append(path, ledger.Marshal(d))
 		}
 		if err != nil {

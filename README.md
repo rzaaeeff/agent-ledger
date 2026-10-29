@@ -1,110 +1,137 @@
 # agent-ledger
 
-Pins, decisions and recent prompts that survive context compaction in Claude Code and Codex, scoped to **one session**.
+You tell the agent "don't touch the migrations". An hour later the context compacts, and that line is gone.
 
-- `PIN: <text>` at the start of a prompt stores the text verbatim. `UNPIN: <id or text>` removes it (from any scope).
-- After `/compact` (or auto-compact), pins, the last 5 prompts and the last 10 decisions are re-injected.
-- After `/clear`, nothing is re-injected. You see a short list of the pins that were dropped.
-- Session ledgers idle for 30 days are pruned at startup.
-- A forked chat gets a new session id, so it starts its own ledger; scoped pins (below) still apply.
-- No dependencies: one static Go binary per OS, files under `~/.local/state/agent-ledger/<repo>-<hash>/<session>/` (0600). The hash of the repo path keeps same-named repos and submodules apart.
+agent-ledger keeps the lines you mark and puts them back after every compaction. It is a small local hook for Claude Code and Codex: no model calls, no server, no database.
 
-## Pins: scope and lifetime
+```
+PIN: don't touch the migrations, the schema is frozen until Friday
+```
 
-| Prompt starts with | Seen by | On `/clear` |
-|---|---|---|
-| `PIN:` | this session | dropped, and you see which |
-| `PIN!:` | this session | kept (and moved if `/clear` starts a new session id) |
-| `CARRY:` | the chat after the next `/clear`, once | injected, then gone; a handoff note |
-| `PIN@branch:` | every session on this branch; refused on the default branch (`main`, `master`, origin's HEAD) and detached HEAD; pruned only once the branch is deleted | kept |
-| `PIN@repo:` | every session and branch of this repo; never pruned | kept |
-| `PIN@global:` | every repo | kept |
+After `/compact`, the agent sees that pin again, word for word, along with up to your last 5 prompts and its last 10 recorded decisions (fewer if they don't fit the size limit).
 
-`PROMOTE: <id or text>` moves a pin into the repo's `AGENTS.md` (else `CLAUDE.md`, or `promote_to`) under "Pinned rules (promoted from agent-ledger)" and unpins it. Nothing is committed; review with `git diff`.
+**Status: v0.1, early.** The hooks are covered by tests that feed them the JSON Claude Code and Codex send. They have not yet been run in a live Claude Code or Codex session. Please report what breaks.
 
-After `/clear`, kept pins, carried notes and scoped pins reach the model as `additionalContext`; the dropped list goes only to you. `agent-ledger status` counts the scoped pins and `agent-ledger preview clear` shows what a `/clear` would drop, keep and carry.
+## Is it for you?
 
-## Install (Claude Code)
+Use it if your sessions are long enough to compact and you keep repeating the same instructions after they do.
+
+Skip it if:
+
+- The rule should hold forever. Put it in `AGENTS.md` or `CLAUDE.md`; the agent already rereads those. (`PROMOTE:` moves a pin there when it turns out to be permanent.)
+- You want searchable memory across projects or automatic notes. This only keeps what you mark, plus recent prompts.
+
+What it does not do: make the model obey. It keeps your text in the context; whether the agent follows it is still up to the model.
+
+## Install
+
+Claude Code:
 
 ```
 /plugin marketplace add rzaaeeff/agent-ledger
 /plugin install agent-ledger@agent-ledger
 ```
 
-On the first hook, `bin/agent-ledger` fetches the binary for your OS/arch from the matching GitHub release in the background and checks its SHA-256; the ledger starts working from the next event. If that fails, hooks skip silently and log to `~/.local/state/agent-ledger/skips.log`. To use your own build, set `AGENT_LEDGER_BIN=/path/to/agent-ledger`.
-
-## Install (Codex)
-
-Codex loads the same plugin (it reads `.claude-plugin/` and `hooks/hooks.json`; hooks are on by default):
+Codex (macOS and Linux):
 
 ```
 codex plugin marketplace add rzaaeeff/agent-ledger
 ```
 
-Then install `agent-ledger` from `/plugins` and approve its hooks when Codex asks. `decide` and `status` find the session through `CODEX_THREAD_ID`.
+then install `agent-ledger` from `/plugins` and approve its hooks.
 
-Codex differences:
+On first use the plugin downloads one binary (about 3.5 MB) for your OS from the GitHub release and checks its SHA-256. The download runs in the background, so hooks start working a few seconds after first use; anything before that is not recorded. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere the hooks do nothing).
 
-- `/clear` starts a new thread and nothing links it to the old one, so the new chat starts with an empty session ledger: no "dropped" list, and `PIN!:`/`CARRY:` do not cross it. For pins that must survive, use `PIN@branch:`/`PIN@repo:`, or set `"key": "branch"`.
-- Compaction re-injects as in Claude Code.
-- macOS and Linux only: on Windows, Codex runs hooks through `cmd.exe`, which does not expand `${CLAUDE_PLUGIN_ROOT}` or run the `sh` shim.
+The hooks never block your prompt. If the download fails, the reason goes to `~/.local/state/agent-ledger/skips.log`. If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 
-Other CLIs without hooks: run `agent-ledger inject` at session start and paste or pipe its output (keyed by branch).
+## Using it
 
-## Performance
+Start a prompt with one of these:
 
-Measured on a 2-core cloud VM, 30 pins and 200 prompts logged, 100 runs each: `user-prompt-submit` 48 ms, `session-start` (compact) 76 ms, `session-end` 37 ms, plus about 65 ms for the `bin/agent-ledger` shell shim. Most of it is `git` subprocesses. Every hook has a 10 s timeout and exits 0 on any error.
+| Prefix | Who sees it | After `/clear` |
+|---|---|---|
+| `PIN:` | this chat | dropped; you get a list of what was dropped (kept if `key` is `branch` or `repo`) |
+| `PIN!:` | this chat | kept |
+| `CARRY:` | the next chat after `/clear`, once | handed over, then deleted |
+| `PIN@branch:` | every chat on this branch (refused on `main`, `master`, the default branch and a detached HEAD) | kept |
+| `PIN@repo:` | every chat in this repo | kept |
+| `PIN@global:` | every chat in every repo | kept |
+| `UNPIN: <id or text>` | removes a pin | |
+| `PROMOTE: <id or text>` | moves a pin into `AGENTS.md` (or `CLAUDE.md` if only that exists), uncommitted | |
 
-## Commands
+Prefixes are case-sensitive and must start the prompt. `UNPIN:` and `PROMOTE:` act only if exactly one pin matches. Each pin gets a short id, shown when you pin it and in the re-injected list.
 
-| Command | What it does |
+Decisions: the plugin ships a `record-decision` skill. When you and the agent settle something, it runs `agent-ledger decide "<decision>" "<because>" "<rejected>"`, and the decision comes back after compaction, so you don't rehash rejected options.
+
+To check what is stored or what the next compaction would inject:
+
+```
+agent-ledger status
+agent-ledger preview          # or: preview clear
+```
+
+The binary is in the plugin's `bin/` folder (for Claude Code, somewhere under `~/.claude/plugins/`); add it to your `PATH` or call it by full path. Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): from a normal terminal there is no session id, so you see the branch ledger, not your chat's.
+
+## Privacy
+
+- By default every prompt is logged, so recent prompts can come back after compaction. Turn this down with `"logging": "pins-only"` or `"off"`.
+- Before anything is stored, common secrets are masked: API keys, GitHub/Slack/AWS tokens, private keys, JWTs, URL passwords and `password=`-style values. This is pattern matching. It will miss some secrets, and it can mask harmless text that looks like one.
+- Files stay on your machine, under `~/.local/state/agent-ledger/` and readable only by you. Nothing is sent anywhere; the only network call is the one-time binary download. When a session starts, ledgers in that repo untouched for 30 days are deleted, including their `PIN!:` pins and decisions. `PIN@branch:` pins go once the branch is deleted and idle. Repo and global pins are kept until you `UNPIN` them.
+- A repo's `.agent-ledger.json` can turn redaction off or logging up. Check it in repos you don't trust.
+
+## Where it works
+
+| Tool | Status |
 |---|---|
-| `agent-ledger decide "<decision>" "<because>" "<rejected>"` | Append a decision (the `record-decision` skill tells the agent how) |
-| `agent-ledger status` | Show the ledger dir, pin count and token estimate |
-| `agent-ledger config` | Effective settings and where each came from |
-| `agent-ledger preview [source]` | Dry run of SessionStart (default `compact`) |
-| `agent-ledger inject` | Print the ledger as context (for CLIs without hooks) |
-| `agent-ledger hook <user-prompt-submit\|session-start\|session-end>` | Hook entry points; read the hook JSON on stdin, always exit 0 |
+| Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Should work: they share the same hooks and plugins |
+| Codex: CLI and desktop app | Should work on macOS/Linux. Not on Windows (Codex runs hooks with `cmd.exe`) |
+| Codex IDE extension | Plugins aren't installed there; manual hook setup may work, untested |
+| Claude Code on the web, Codex cloud | No. The ledger is a local folder |
+
+Codex `/clear` opens a new thread with no link to the old one, so `PIN:`, `PIN!:` and `CARRY:` don't cross it. Use `PIN@branch:` or `PIN@repo:` there.
+
+## How chats are told apart
+
+By default each chat has its own ledger, keyed by the session id Claude Code or Codex passes to the hooks. Switching branch or worktree mid-chat keeps the same ledger, and a second chat on the same branch never sees the first one's pins.
+
+After `/clear`, Claude Code may start a new session id. Your `PIN!:` pins and `CARRY:` items move to it only if exactly one chat in the same folder was cleared in the last 10 minutes. If several were, nothing moves and you are told. A forked chat starts its own ledger.
+
+Without a hook session id (`decide`, `status`, `preview`), the ledger comes from `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID` or `CODEX_THREAD_ID`, else the current branch (`detached` on a detached HEAD). You get a warning when it falls back to the branch.
 
 ## Configuration
 
-Layers, later wins: defaults < user `~/.config/agent-ledger/config.json` (`%APPDATA%` on Windows) < repo `.agent-ledger.json` (commit it to share with the team) < env `AGENT_LEDGER_<KEY>`.
+Optional. Put it in `~/.config/agent-ledger/config.json` (yours) or `.agent-ledger.json` in the repo (the team's). Env vars `AGENT_LEDGER_<KEY>` override both. `agent-ledger config` shows the effective values and where each came from.
 
 ```json
-{ "key": "session", "clear": "drop", "prune_days": 30, "recent_prompts": 5, "decisions": 10, "budget_chars": 16000,
-  "logging": "all", "redact": "on" }
+{ "key": "session", "logging": "all", "redact": "on", "prune_days": 30 }
 ```
 
-| Key | Values | Meaning |
+| Key | Values | Default |
 |---|---|---|
-| `key` | `session` (default), `branch`, `repo` | Who shares a ledger: one chat, everyone on a branch, or the whole repo |
-| `clear` | `drop`, `keep` | On `/clear`: drop pins and show them, or re-inject pins and decisions. Default `drop` for `session`, `keep` otherwise |
-| `prune_days` | 0-36500 | Delete ledgers idle this long at startup; 0 = never |
-| `recent_prompts`, `decisions` | 0-100, 0-200 | How many are re-injected after compact |
-| `budget_chars` | 1000-400000 | Injection budget; pins are never cut |
-| `logging` | `all` (default), `pins-only`, `off` | Which prompts are stored; pins are always kept |
-| `redact` | `on` (default), `off` | Mask API keys, tokens, private keys, JWTs, URL passwords and `password=`-style values before storing |
-| `promote_to` | a file name like `RULES.md` | Target of `PROMOTE:` (top of the work tree; no paths) |
+| `key` | `session`, `branch`, `repo`: who shares one ledger | `session` |
+| `clear` | `drop`, `keep`: what `/clear` does to `PIN:` pins | `drop` for `session`, else `keep` |
+| `logging` | `all`, `pins-only`, `off` | `all` |
+| `redact` | `on`, `off` | `on` |
+| `prune_days` | days of no activity before a ledger is deleted; `0` = never | `30` |
+| `recent_prompts` / `decisions` | how many come back after compaction | `5` / `10` |
+| `budget_chars` | size limit of what is re-injected. Older prompts, then decisions, are dropped to fit; pins are never cut, but you get a warning when they alone are over. Above ~10,000 the host may truncate it | `9000` |
+| `promote_to` | file name `PROMOTE:` writes to | `AGENTS.md`; `CLAUDE.md` if only that exists |
 
-Bad files, unknown keys and invalid values are ignored; `agent-ledger config` shows each effective value, where it came from and any problem. `agent-ledger preview [compact|clear|startup|resume]` shows what the next SessionStart would inject, drop or prune, without doing it.
+Invalid values are ignored and listed by `agent-ledger config`.
 
-`clear: keep` with `key: session` only helps if `/clear` keeps the session id (unverified).
+## Cost
 
-## Keying
+On a slow 2-core VM each hook takes 40-75 ms plus about 65 ms for the launcher script, so roughly 0.1 s per prompt. After compaction, prompts and decisions are trimmed to fit `budget_chars` (9000 characters, about 2,000-2,500 tokens); pins are never trimmed, so many pins can push past it.
 
-With `key: session` (default):
-
-1. The hook's `session_id` (hooks), else `CLAUDE_SESSION_ID` (written to `CLAUDE_ENV_FILE` at session start), else `CLAUDE_CODE_SESSION_ID`, else Codex's `CODEX_THREAD_ID`.
-2. With no session id, the current git branch (`detached` for detached HEAD), so manual runs and other CLIs still work.
-
-Set `AGENT_LEDGER_DEBUG=1` to log every hook's input to `hooks.debug.log` in the repo ledger dir.
-
-## Build
+## Development
 
 ```
 go test ./...
-go build -o bin/agent-ledger-$(go env GOOS)-$(go env GOARCH) ./cmd/agent-ledger
-scripts/release.sh   # all 6 targets + checksums.txt into dist/
+scripts/release.sh   # builds all 6 targets + checksums.txt into dist/
 ```
 
-Releases: bump `VERSION` and `.claude-plugin/plugin.json`, then push tag `v<VERSION>`; `release.yml` builds and uploads.
+`AGENT_LEDGER_BIN=/path/to/binary` makes the plugin use your own build. `AGENT_LEDGER_DEBUG=1` logs every hook input to `hooks.debug.log` in the repo's ledger folder.
+
+## License
+
+MIT

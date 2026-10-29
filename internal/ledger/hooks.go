@@ -10,10 +10,12 @@ import (
 	"unicode/utf8"
 )
 
-// Injection budget: about 4k tokens (16000 chars, bytes/4 estimate). Pins are
+// Injection budget: about 2.2k tokens (9000 chars, bytes/4 estimate), under the
+// ~10k-char / 2.5k-token caps Claude Code and Codex put on hook context. Pins are
 // never trimmed: past 2k tokens of pins a warning is added and all are kept.
 const (
-	Budget        = 16000
+	Budget        = 9000
+	DecisionMax   = 600
 	PinWarnChars  = 8000
 	RecentPrompts = 5
 	RecentDecs    = 10
@@ -97,6 +99,9 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	ts := stamp()
 	if cfg.Logging == "all" || (cfg.Logging == "pins-only" && ok) {
 		if MkdirPrivate(dir) != nil {
+			if ok && cmd.text != "" {
+				emit(out, cmd.verb+" NOT SAVED: could not create "+dir+" (check permissions and disk space).")
+			}
 			return
 		}
 		if Append(filepath.Join(dir, PromptsFile), Marshal(Prompt{ts, h.SessionID, prompt})) != nil {
@@ -114,6 +119,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		return
 	}
 	if MkdirPrivate(dir) != nil {
+		emit(out, cmd.verb+" NOT SAVED: could not create "+dir+" (check permissions and disk space).")
 		return
 	}
 	out = &suffixWriter{w: out, suffix: note}
@@ -157,6 +163,8 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		id := pinID(scope, cmd.text)
 		if MkdirPrivate(target) != nil || Append(filepath.Join(target, PinnedFile), Marshal(Pin{id, ts, cmd.text, life})) != nil {
 			LogError(dir, "pinned append failed")
+			emit(out, "PIN NOT SAVED: could not write "+filepath.Join(target, PinnedFile)+" (check permissions and disk space).")
+			return
 		}
 		emit(out, fmt.Sprintf("pinned [%s]%s. %s", id, where, Status(dir)))
 	case "UNPIN":
@@ -241,7 +249,7 @@ func (s *suffixWriter) Write(b []byte) (int, error) {
 func HookSessionStart(h HookInput, out io.Writer) {
 	if h.SessionID != "" {
 		if f := os.Getenv("CLAUDE_ENV_FILE"); f != "" {
-			_ = appendRaw(f, []byte("export CLAUDE_SESSION_ID="+Safe(h.SessionID, 100, true)+"\n"))
+			_ = appendRaw(f, []byte("export CLAUDE_SESSION_ID="+SessionKey(h.SessionID)+"\n"))
 		}
 	}
 	root, err := Root(h.Cwd)
@@ -275,7 +283,7 @@ func HookSessionStart(h HookInput, out io.Writer) {
 		text := Compose(h.Cwd, dir, cfg)
 		c := takeCarry(dir)
 		_, statErr := os.Stat(dir)
-		if note := TakeCleared(root, h.SessionID, h.Cwd, statErr != nil || cfg.Key != KeySession); note != nil {
+		if note, _ := TakeCleared(root, h.SessionID, h.Cwd, statErr != nil || cfg.Key != KeySession); note != nil {
 			c = append(c, note.Carry...)
 		}
 		if len(c) > 0 {
@@ -335,15 +343,21 @@ func Compose(cwd, dir string, cfg Config) string {
 			rl = append(rl, fmt.Sprintf("- %s: %s", ts, text))
 		}
 		for _, x := range tail(decisions, d) {
-			dl = append(dl, fmt.Sprintf("- DECISION: %s\n  BECAUSE: %s\n  REJECTED: %s", x.Decision, x.Because, x.Rejected))
+			c := func(s string) string {
+				if t, was := cut(s, DecisionMax); was {
+					return t + " [cut; full text in decisions.jsonl]"
+				}
+				return s
+			}
+			dl = append(dl, fmt.Sprintf("- DECISION: %s\n  BECAUSE: %s\n  REJECTED: %s", c(x.Decision), c(x.Because), c(x.Rejected)))
 		}
 		recent, decs = strings.Join(rl, "\n"), strings.Join(dl, "\n")
 		if runes(pins)+runes(scoped)+runes(recent)+runes(decs) <= cfg.BudgetChars {
 			break
 		}
-		if r > 1 {
+		if r > 0 {
 			r--
-		} else if d > 1 {
+		} else if d > 0 {
 			d--
 		} else {
 			break
@@ -358,7 +372,9 @@ func Compose(cwd, dir string, cfg Config) string {
 		b.WriteString("\n### Pinned by the user (standing rules and concerns, verbatim)\n" + pins)
 	}
 	b.WriteString(scoped)
-	if runes(pins)+runes(scoped) > PinWarnChars {
+	if n := runes(pins) + runes(scoped); n > cfg.BudgetChars {
+		b.WriteString("\nWARNING: pinned items exceed the injection budget; the host may truncate this block. UNPIN: <id> the ones that no longer apply.")
+	} else if n > PinWarnChars {
 		b.WriteString("\nWARNING: pinned items exceed 2k tokens; UNPIN: <id> the ones that no longer apply.")
 	}
 	if recent != "" {
@@ -382,8 +398,11 @@ func cleared(cfg Config, root, dir string, h HookInput, out io.Writer) {
 		markCleared(dir)
 	}
 	_ = ClearPins(dir, root, h.SessionID, h.Cwd)
-	note := TakeCleared(root, h.SessionID, h.Cwd, isNew)
+	note, ambiguous := TakeCleared(root, h.SessionID, h.Cwd, isNew)
 	var msg, ctx []string
+	if ambiguous {
+		msg = append(msg, "ledger: several chats were /cleared in this folder in the last 10 minutes, so I can't tell which one this was; no pins were carried over. PIN: again what still applies.")
+	}
 	if note != nil {
 		// PIN! pins stay in place for the same session; a new id gets a copy.
 		if len(note.Kept) > 0 && filepath.Clean(note.Dir) != filepath.Clean(dir) && MkdirPrivate(dir) == nil {
