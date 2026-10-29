@@ -1,8 +1,10 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -119,11 +121,28 @@ func LoadConfig(cwd string) Config {
 	return c
 }
 
+// maxConfigBytes caps a config file: the repo layer comes from any cloned repo.
+const maxConfigBytes = 64 << 10
+
 func (c *Config) layerFile(path string) {
-	data, err := os.ReadFile(path)
+	// Only a regular file (after symlinks), read with a cap: a committed symlink to
+	// /dev/zero or a FIFO must not hang or exhaust a hook.
+	if fi, err := os.Stat(path); err != nil {
+		return
+	} else if !fi.Mode().IsRegular() || fi.Size() > maxConfigBytes {
+		c.Problems = append(c.Problems, fmt.Sprintf("%s: not a regular file under 64 KiB, ignored", path))
+		return
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return
 	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	if err != nil || len(data) > maxConfigBytes {
+		return
+	}
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		c.Problems = append(c.Problems, fmt.Sprintf("%s: not valid JSON, ignored", path))
@@ -141,7 +160,8 @@ func (c *Config) layerFile(path string) {
 	for _, k := range names {
 		f, ok := known[k]
 		if !ok {
-			c.Problems = append(c.Problems, fmt.Sprintf("%s: unknown key %q ignored", path, k))
+			name, _ := cut(k, 40)
+			c.Problems = append(c.Problems, fmt.Sprintf("%s: unknown key %q ignored", path, name))
 			continue
 		}
 		switch v := raw[k].(type) {
@@ -150,7 +170,7 @@ func (c *Config) layerFile(path string) {
 		case float64:
 			c.set(f, strconv.FormatFloat(v, 'f', -1, 64), path)
 		default:
-			c.Problems = append(c.Problems, fmt.Sprintf("%s: %s: unsupported value %v, ignored", path, k, raw[k]))
+			c.Problems = append(c.Problems, fmt.Sprintf("%s: %s: unsupported value type, ignored", path, k))
 		}
 	}
 }
@@ -165,11 +185,13 @@ func (c *Config) set(f field, v, from string) {
 				return
 			}
 		}
+		v, _ = cut(v, 40)
 		c.Problems = append(c.Problems, fmt.Sprintf("%s: %s=%q ignored (want %s)", from, f.name, v, strings.Join(f.allowed, "|")))
 		return
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n < f.minimum || n > f.maxi {
+		v, _ = cut(v, 40)
 		c.Problems = append(c.Problems, fmt.Sprintf("%s: %s=%q ignored (want an integer %d..%d)", from, f.name, v, f.minimum, f.maxi))
 		return
 	}

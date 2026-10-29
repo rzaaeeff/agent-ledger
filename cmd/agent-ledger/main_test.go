@@ -599,6 +599,28 @@ func TestConfigLayers(t *testing.T) {
 	if c = ledger.LoadConfig(e.repo); c.RecentPrompts != 3 || len(c.Problems) != 1 {
 		t.Errorf("a broken repo file must be ignored: %+v %q", c, c.Problems)
 	}
+	writeFile(t, repoFile, "\xef\xbb\xbf{\"recent_prompts\":1}")
+	if c = ledger.LoadConfig(e.repo); c.RecentPrompts != 1 {
+		t.Errorf("a UTF-8 BOM must not void the file: %+v %q", c, c.Problems)
+	}
+	if runtime.GOOS != "windows" {
+		os.Remove(repoFile)
+		if err := os.Symlink("/dev/zero", repoFile); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan ledger.Config, 1)
+		go func() { done <- ledger.LoadConfig(e.repo) }()
+		select {
+		case c = <-done:
+			if c.RecentPrompts != 3 || len(c.Problems) != 1 {
+				t.Errorf("a symlink to a device must be ignored: %+v %q", c, c.Problems)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a symlink to /dev/zero hangs LoadConfig")
+		}
+		os.Remove(repoFile)
+		writeFile(t, repoFile, "not json")
+	}
 	// Hooks never fail on a broken config.
 	if out, errs, rc := cli(e.prompt("PIN: x", "s1"), "hook", "user-prompt-submit"); rc != 0 || errs != "" || !strings.Contains(out, "pinned") {
 		t.Errorf("hook with broken config: rc=%d out=%q err=%q", rc, out, errs)
