@@ -42,7 +42,7 @@ then install `agent-ledger` from `/plugins` and approve its hooks.
 
 On first use the plugin downloads one binary (about 3.5 MB) for your OS from the GitHub release and checks its SHA-256. The download runs in the background, so hooks start working a few seconds after first use; anything before that is not recorded. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere the hooks do nothing).
 
-The hooks never block your prompt. If the download fails, the reason goes to `~/.local/state/agent-ledger/skips.log`. If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
+The hooks never block your prompt (`PINS?` is the one exception, on purpose). If the download fails, the reason goes to `~/.local/state/agent-ledger/skips.log`. If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 
 ## Using it
 
@@ -56,10 +56,17 @@ Start a prompt with one of these:
 | `PIN@branch:` | every chat on this branch (refused on `main`, `master`, the default branch and a detached HEAD) | kept |
 | `PIN@repo:` | every chat in this repo | kept |
 | `PIN@global:` | every chat in every repo | kept |
-| `UNPIN: <id or text>` | removes a pin | |
-| `PROMOTE: <id or text>` | moves a pin into `AGENTS.md` (or `CLAUDE.md` if only that exists), uncommitted | |
+| `PINS?` | lists your pins with numbers; only you see it, the agent gets nothing | |
+| `UNPIN: <number, id, words or last>` | removes a pin | |
+| `PROMOTE: <number, id or words>` | moves a pin into `AGENTS.md` (or `CLAUDE.md` if only that exists), uncommitted | |
 
-Prefixes are case-sensitive and must start the prompt. `UNPIN:` and `PROMOTE:` act only if exactly one pin matches. Each pin gets a short id, shown when you pin it and in the re-injected list.
+Prefixes are case-sensitive and must start the prompt. Each pin gets a short id, shown when you pin it, in `PINS?` and in the re-injected list.
+
+You don't have to remember a pin's exact wording:
+
+- `UNPIN: friday migrations` finds "Don't touch the migrations until Friday": case, punctuation and word order don't matter. `UNPIN: last` takes the newest pin, `UNPIN: 2` the second one in `PINS?`.
+- If nothing or more than one pin matches, nothing is removed and you get the closest pins with their ids.
+- Pinning the same text again does nothing (`PIN!:` on a `PIN:` makes it survive `/clear`). Pinning something close to an existing pin saves it and names the old one, so you can `UNPIN` it if the new one replaces it. The tool never decides that for you.
 
 Decisions: the plugin ships a `record-decision` skill. When you and the agent settle something, it runs `agent-ledger decide "<decision>" "<because>" "<rejected>"`, and the decision comes back after compaction, so you don't rehash rejected options.
 

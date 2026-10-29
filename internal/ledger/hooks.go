@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -72,10 +73,15 @@ func debug(root, event string, h HookInput) {
 //	PIN@branch: <text> for every session on this branch (refused on the default branch)
 //	PIN@repo: <text>   for every session and branch of this repo
 //	PIN@global: <text> for every repo
-//	UNPIN: <id|text>   removes the pin with that id, or the only one containing the
-//	                   text, from any of those stores
-//	PROMOTE: <id|text> moves that pin into the repo's AGENTS.md (or CLAUDE.md, or
+//	UNPIN: <ref>       removes the one pin ref selects, from any of those stores:
+//	                   an id, its number in PINS?, "last", or words in it in any
+//	                   order (case and punctuation ignored); else lists the closest
+//	PROMOTE: <ref>     moves that pin into the repo's AGENTS.md (or CLAUDE.md, or
 //	                   promote_to), uncommitted
+//	PINS?              blocks the prompt; the user (not the model) sees the pins
+//
+// The same text pinned again in the same store is not added (PIN! upgrades a
+// PIN); a pin similar to an existing one is added with a note naming it.
 //
 // Config logging=pins-only logs only these commands, logging=off logs no prompts
 // (pins are still kept); redact=on (default) masks credentials before storing.
@@ -89,6 +95,15 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	cfg := LoadConfig(h.Cwd)
 	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
 	if err != nil {
+		return
+	}
+	here := map[string]string{"branch": "this branch", "repo": "this repo"}[cfg.Key]
+	if here == "" {
+		here = "this chat"
+	}
+	if strings.TrimSpace(h.Prompt) == "PINS?" {
+		// Blocking the prompt shows the reason to the user only: no model turn.
+		fmt.Fprintf(out, "%s\n", Marshal(map[string]string{"decision": "block", "reason": PinsList(listPins(h.Cwd, dir, here))}))
 		return
 	}
 	prompt, masked := h.Prompt, 0
@@ -161,35 +176,80 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			_ = writeReplace(filepath.Join(target, BranchNameFile), []byte(b+"\n"))
 		}
 		id := pinID(scope, cmd.text)
-		if MkdirPrivate(target) != nil || Append(filepath.Join(target, PinnedFile), Marshal(Pin{id, ts, cmd.text, life})) != nil {
+		if life == LifeCarry {
+			// Apart from a PIN: of the same text, so UNPIN can take either.
+			id = pinID(LifeCarry, cmd.text)
+		}
+		file := filepath.Join(target, PinnedFile)
+		all := listPins(h.Cwd, dir, here)
+		var similar []located
+		for _, p := range all {
+			sameStore := filepath.Clean(p.File) == filepath.Clean(file) && (p.Life == LifeCarry) == (life == LifeCarry)
+			switch {
+			case sameStore && normText(p.Text) == normText(cmd.text):
+				msg := fmt.Sprintf("already pinned [%s]", p.ID)
+				if life == LifeKeep && p.Life == "" {
+					if err := setLife(file, p.ID, LifeKeep); err != nil {
+						LogError(dir, "pin upgrade failed")
+						emit(out, fmt.Sprintf("already pinned [%s]; could NOT make it survive /clear (see %s).", p.ID, filepath.Join(dir, ErrorsFile)))
+						return
+					}
+					msg += "; it now survives /clear"
+				}
+				emit(out, msg+". "+Status(dir))
+				return
+			case p.ID != id && looksSimilar(p.Text, cmd.text):
+				similar = append(similar, p)
+			}
+		}
+		if MkdirPrivate(target) != nil || Append(file, Marshal(Pin{id, Now().Format(time.RFC3339Nano), cmd.text, life})) != nil {
 			LogError(dir, "pinned append failed")
-			emit(out, "PIN NOT SAVED: could not write "+filepath.Join(target, PinnedFile)+" (check permissions and disk space).")
+			emit(out, cmd.verb+" NOT SAVED: could not write "+file+" (check permissions and disk space).")
 			return
 		}
-		emit(out, fmt.Sprintf("pinned [%s]%s. %s", id, where, Status(dir)))
-	case "UNPIN":
-		text := cmd.text
-		hits, err := UnpinAny(h.Cwd, dir, text)
-		switch {
-		case err == nil && hits == 0:
-			emit(out, "UNPIN did nothing: no pins match. "+Status(dir))
-		case err != nil:
-			LogError(dir, "unpin failed")
-			emit(out, "UNPIN failed, see "+filepath.Join(dir, ErrorsFile))
-		case hits == 1:
-			emit(out, "unpinned. "+Status(dir))
-		default:
-			LogError(dir, fmt.Sprintf("UNPIN '%s' matched %d items; nothing removed", text, hits))
-			emit(out, fmt.Sprintf("UNPIN did nothing: '%s' matched %d pins (use the [id] from the pin list). %s", text, hits, Status(dir)))
+		msg := fmt.Sprintf("pinned [%s]%s.", id, where)
+		if len(similar) > 0 {
+			if len(similar) > 2 {
+				similar = similar[:2]
+			}
+			msg += " Similar: " + refList(similar) + ". Both are kept; if this one replaces it, send UNPIN: " + similar[0].ID + "."
 		}
-	case "PROMOTE":
-		if cmd.scope != "" || cmd.keep {
+		emit(out, msg+" "+Status(dir))
+	case "UNPIN", "PROMOTE":
+		if cmd.verb == "PROMOTE" && (cmd.scope != "" || cmd.keep) {
 			emit(out, "PROMOTE takes no scope or '!': PROMOTE: <id or text>.")
 			return
 		}
-		p, from, hits := findPin(h.Cwd, dir, cmd.text)
-		if hits != 1 {
-			emit(out, fmt.Sprintf("PROMOTE did nothing: '%s' matched %d pins (use the [id] from the pin list).", cmd.text, hits))
+		all := listPins(h.Cwd, dir, here)
+		hits := matching(resolveRef(cmd.text, all), all)
+		if len(hits) != 1 {
+			msg := fmt.Sprintf("%s did nothing: no pin matches %q.", cmd.verb, cmd.text)
+			if len(all) == 0 {
+				emit(out, cmd.verb+" did nothing: there are no pins here.")
+				return
+			}
+			if c := closest(cmd.text, all, 3); len(hits) == 0 && len(c) > 0 {
+				msg += " Closest: " + refList(c) + "."
+			} else if len(hits) > 1 {
+				if len(hits) > 5 {
+					hits = hits[:5]
+				}
+				msg = fmt.Sprintf("%s did nothing: %q matches several pins: %s.", cmd.verb, cmd.text, refList(hits))
+			}
+			emit(out, msg+fmt.Sprintf(" Send %s: <id>, or PINS? to list them.", cmd.verb))
+			return
+		}
+		p, from := hits[0].Pin, hits[0].File
+		if cmd.verb == "UNPIN" {
+			switch ok, err := Unpin(from, p.ID); {
+			case err != nil:
+				LogError(dir, "unpin failed")
+				emit(out, "UNPIN failed, see "+filepath.Join(dir, ErrorsFile))
+			case !ok:
+				emit(out, fmt.Sprintf("UNPIN did nothing: [%s] was already gone. %s", p.ID, Status(dir)))
+			default:
+				emit(out, fmt.Sprintf("unpinned [%s] %q. %s", p.ID, short(p.Text, 60), Status(dir)))
+			}
 			return
 		}
 		target, err := PromoteTarget(cfg, h.Cwd)

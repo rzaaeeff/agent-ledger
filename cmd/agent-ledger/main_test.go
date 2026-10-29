@@ -187,16 +187,13 @@ func TestLoggingAndPins(t *testing.T) {
 		t.Errorf("no-match UNPIN message = %q", msg)
 	}
 	e.say("PIN: second rule about main", "s1")
-	if msg := sysMsg(t, e.say("UNPIN: main", "s1")); !strings.Contains(msg, "matched 2 pins") {
+	if msg := sysMsg(t, e.say("UNPIN: main", "s1")); !strings.Contains(msg, "matches several pins") {
 		t.Errorf("ambiguous UNPIN message = %q", msg)
 	}
 	if n := len(lines(t, filepath.Join(d, "pinned.jsonl"))); n != 2 {
 		t.Errorf("ambiguous UNPIN removed something: %d pins", n)
 	}
-	if data, _ := os.ReadFile(filepath.Join(d, "errors.log")); !strings.Contains(string(data), "matched 2") {
-		t.Errorf("ambiguous UNPIN not logged: %q", data)
-	}
-	if msg := sysMsg(t, e.say("UNPIN: x", "fresh")); !strings.Contains(msg, "no pins") {
+	if msg := sysMsg(t, e.say("UNPIN: x", "fresh")); !strings.Contains(msg, "no pins here") {
 		t.Errorf("UNPIN without pins = %q", msg)
 	}
 }
@@ -779,7 +776,7 @@ func TestPinScopes(t *testing.T) {
 	// Same text in two scopes: two ids; UNPIN by text is ambiguous, by id exact.
 	e.say("PIN: shared text", "s3")
 	e.say("PIN@repo: shared text", "s3")
-	if msg := sysMsg(t, e.say("UNPIN: shared text", "s3")); !strings.Contains(msg, "matched 2") {
+	if msg := sysMsg(t, e.say("UNPIN: shared text", "s3")); !strings.Contains(msg, "matches several") {
 		t.Errorf("ambiguous cross-scope UNPIN: %q", msg)
 	}
 	var repoID string
@@ -1045,7 +1042,7 @@ func TestPromote(t *testing.T) {
 
 	e.say("PIN: alpha x", "s1")
 	e.say("PIN: alpha y", "s1")
-	if msg := sysMsg(t, e.say("PROMOTE: alpha", "s1")); !strings.Contains(msg, "matched 2") {
+	if msg := sysMsg(t, e.say("PROMOTE: alpha", "s1")); !strings.Contains(msg, "matches several") {
 		t.Errorf("ambiguous promote: %q", msg)
 	}
 
@@ -1125,5 +1122,130 @@ func TestLaunchFixes(t *testing.T) {
 	t.Setenv("AGENT_LEDGER_BUDGET_CHARS", "")
 	if out, _, _ := cli(nil, "inject"); !strings.Contains(out, "[cut; full text in decisions.jsonl]") || len(out) > 9000+400 {
 		t.Errorf("default budget: %d chars, cut marker missing", len(out))
+	}
+}
+
+func pinTexts(t *testing.T, path string) []string {
+	t.Helper()
+	var out []string
+	for _, l := range lines(t, path) {
+		var p ledger.Pin
+		if json.Unmarshal([]byte(l), &p) == nil {
+			out = append(out, p.Text+"|"+p.Life)
+		}
+	}
+	return out
+}
+
+// Forgetful users: loose UNPIN/PROMOTE matching, shortcuts, PINS?, and notes on
+// similar or duplicate pins.
+func TestForgivingPins(t *testing.T) {
+	e := setup(t)
+	d := e.dir("s1")
+	f := filepath.Join(d, "pinned.jsonl")
+
+	// A word missing from the middle, other case and punctuation still match.
+	e.say("PIN: Don't touch the migrations, the schema is frozen until Friday", "s1")
+	if msg := sysMsg(t, e.say("UNPIN: touch migrations FRIDAY", "s1")); !strings.Contains(msg, "unpinned") {
+		t.Errorf("loose UNPIN: %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 0 {
+		t.Errorf("loose UNPIN left %d pins", n)
+	}
+
+	// A miss lists the closest pins with their ids and removes nothing.
+	e.say("PIN: deploy only from the release branch", "s1")
+	e.say("PIN: use pnpm, not npm", "s1")
+	msg := sysMsg(t, e.say("UNPIN: deploy from staging branch", "s1"))
+	if !strings.Contains(msg, "no pin matches") || !strings.Contains(msg, "Closest") || !strings.Contains(msg, "deploy only from the release branch") || strings.Contains(msg, "pnpm") {
+		t.Errorf("miss without closest pins: %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 2 {
+		t.Errorf("a miss removed something: %d pins", n)
+	}
+
+	// PINS? is answered by blocking the prompt: the user sees the list, the model
+	// sees nothing, and it is not logged.
+	before := len(lines(t, filepath.Join(d, "prompts.jsonl")))
+	out := e.say("  PINS?  ", "s1")
+	var v map[string]string
+	if json.Unmarshal([]byte(out), &v) != nil || v["decision"] != "block" || !strings.Contains(v["reason"], "1. [") ||
+		!strings.Contains(v["reason"], "2. [") || !strings.Contains(v["reason"], "use pnpm") {
+		t.Errorf("PINS? output: %q", out)
+	}
+	if n := len(lines(t, filepath.Join(d, "prompts.jsonl"))); n != before {
+		t.Errorf("PINS? was logged")
+	}
+	if out := e.say("PINS?", "empty"); !strings.Contains(out, "No pins here") {
+		t.Errorf("PINS? with no pins: %q", out)
+	}
+
+	// Shortcuts: a number from PINS?, and the newest pin.
+	if msg := sysMsg(t, e.say("UNPIN: 1", "s1")); !strings.Contains(msg, "deploy only") {
+		t.Errorf("UNPIN: 1 = %q", msg)
+	}
+	e.say("PIN@repo: repo rule one", "s1")
+	e.say("PIN: newest rule", "s1")
+	if msg := sysMsg(t, e.say("UNPIN: last", "s1")); !strings.Contains(msg, "newest rule") {
+		t.Errorf("UNPIN: last = %q", msg)
+	}
+	if msg := sysMsg(t, e.say("UNPIN: last", "s1")); !strings.Contains(msg, "repo rule one") {
+		t.Errorf("UNPIN: last across stores = %q", msg)
+	}
+
+	// Exact duplicate (ignoring case and punctuation): not added again.
+	if msg := sysMsg(t, e.say("PIN: Use pnpm not NPM!", "s1")); !strings.Contains(msg, "already pinned") {
+		t.Errorf("duplicate PIN: %q", msg)
+	}
+	if got := pinTexts(t, f); len(got) != 1 {
+		t.Errorf("duplicate stored: %v", got)
+	}
+	// PIN! of a plain pin upgrades it instead of storing it twice.
+	if msg := sysMsg(t, e.say("PIN!: use pnpm, not npm", "s1")); !strings.Contains(msg, "now survives /clear") {
+		t.Errorf("PIN! upgrade: %q", msg)
+	}
+	if got := pinTexts(t, f); len(got) != 1 || got[0] != "use pnpm, not npm|keep" {
+		t.Errorf("after upgrade: %v", got)
+	}
+
+	// Similar pin: saved, with a note naming the old one; unrelated: no note.
+	e.say("PIN: don't touch the migrations, schema frozen until Friday", "s1")
+	msg = sysMsg(t, e.say("PIN: don't touch migrations until Monday", "s1"))
+	if !strings.Contains(msg, "pinned [") || !strings.Contains(msg, "Similar") || !strings.Contains(msg, "frozen until Friday") || !strings.Contains(msg, "UNPIN: ") {
+		t.Errorf("similar PIN: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PIN: run migrations before the tests", "s1")); strings.Contains(msg, "Similar") {
+		t.Errorf("unrelated pin flagged similar: %q", msg)
+	}
+	if n := len(pinTexts(t, f)); n != 4 {
+		t.Errorf("want 4 pins, got %d", n)
+	}
+
+	// CARRY of a pinned text: both kept, different ids, UNPIN by id takes one.
+	msg = sysMsg(t, e.say("CARRY: use pnpm, not npm", "s1"))
+	if !strings.Contains(msg, "Similar") {
+		t.Errorf("CARRY of a pinned text: %q", msg)
+	}
+	var carryID string
+	for _, l := range lines(t, f) {
+		var p ledger.Pin
+		if json.Unmarshal([]byte(l), &p) == nil && p.Life == "carry" {
+			carryID = p.ID
+		}
+	}
+	if carryID == "" || carryID == strings.Split(strings.Split(sysMsg(t, e.say("PIN: use pnpm, not npm", "s1")), "[")[1], "]")[0] {
+		t.Errorf("CARRY and PIN share an id %q", carryID)
+	}
+	e.say("UNPIN: "+carryID, "s1")
+	if got := pinTexts(t, f); len(got) != 4 || strings.Contains(strings.Join(got, ","), "|carry") {
+		t.Errorf("UNPIN of the CARRY id: %v", got)
+	}
+
+	// Several matches: listed, nothing removed; PROMOTE uses the same matching.
+	if msg := sysMsg(t, e.say("UNPIN: migrations", "s1")); !strings.Contains(msg, "matches several") {
+		t.Errorf("ambiguous: %q", msg)
+	}
+	if msg := sysMsg(t, e.say("PROMOTE: friday migrations", "s1")); !strings.Contains(msg, "promoted") {
+		t.Errorf("loose PROMOTE: %q", msg)
 	}
 }
