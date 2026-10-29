@@ -249,7 +249,7 @@ func (s *suffixWriter) Write(b []byte) (int, error) {
 func HookSessionStart(h HookInput, out io.Writer) {
 	if h.SessionID != "" {
 		if f := os.Getenv("CLAUDE_ENV_FILE"); f != "" {
-			_ = appendRaw(f, []byte("export CLAUDE_SESSION_ID="+Safe(h.SessionID, 100, true)+"\n"))
+			_ = appendRaw(f, []byte("export CLAUDE_SESSION_ID="+SessionKey(h.SessionID)+"\n"))
 		}
 	}
 	root, err := Root(h.Cwd)

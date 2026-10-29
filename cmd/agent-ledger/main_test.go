@@ -268,8 +268,16 @@ func TestKeyedBySession(t *testing.T) {
 	if out := e.inject("startup", "a b;$(x)"); out != "" {
 		t.Errorf("startup of a new session printed %q", out)
 	}
-	if ls := lines(t, envFile); len(ls) == 0 || ls[len(ls)-1] != "export CLAUDE_SESSION_ID=a_b___x_" {
-		t.Errorf("CLAUDE_ENV_FILE = %q", ls)
+	ls := lines(t, envFile)
+	if len(ls) == 0 || ls[len(ls)-1] != "export CLAUDE_SESSION_ID="+ledger.SessionKey("a b;$(x)") {
+		t.Fatalf("CLAUDE_ENV_FILE = %q", ls)
+	}
+	// decide with the exported id must land in the ledger the hooks use.
+	t.Setenv("CLAUDE_SESSION_ID", strings.TrimPrefix(ls[len(ls)-1], "export CLAUDE_SESSION_ID="))
+	cli(nil, "decide", "exported", "b", "-")
+	t.Setenv("CLAUDE_SESSION_ID", "")
+	if out := e.inject("compact", "a b;$(x)"); !strings.Contains(out, "DECISION: exported") {
+		t.Errorf("decide via the exported id is not seen by the hooks:\n%s", out)
 	}
 }
 
