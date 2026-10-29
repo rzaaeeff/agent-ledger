@@ -739,6 +739,9 @@ func TestPinScopes(t *testing.T) {
 	e.say("PIN@repo: repo rule", "s1")
 	e.say("PIN@global: global rule", "s1")
 	e.say("PIN: session rule", "s1")
+	if out, _, _ := cli(nil, "status"); !strings.Contains(out, "scoped pins: branch feat 1 | repo 1 | global 1") {
+		t.Errorf("status must count scoped pins:\n%s", out)
+	}
 
 	out := e.inject("compact", "s2")
 	for _, want := range []string{"Pinned for branch feat", "feat rule", "repo rule", "global rule"} {

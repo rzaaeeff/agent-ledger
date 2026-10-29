@@ -99,7 +99,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		} else {
 			fmt.Fprintln(stdout, ledger.Status(dir))
 		}
-		fmt.Fprintln(stdout, ledger.ScopeStatus(cwd, dir))
+		if s := ledger.ScopeStatus(cwd, dir); s != "" {
+			fmt.Fprintln(stdout, s)
+		}
 		return 0
 	case "config":
 		cwd, _ := os.Getwd()

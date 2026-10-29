@@ -186,16 +186,22 @@ func scopedSections(cwd, dir string) string {
 }
 
 // ScopeStatus counts the pins of each scope besides dir, e.g.
-// "scoped pins: branch feat 1 | repo 2 | global 0".
+// "scoped pins: branch feat 1 | repo 2 | global 0", or "" when there are none.
 func ScopeStatus(cwd, dir string) string {
 	var parts []string
+	total := 0
 	for _, s := range PinScopes(cwd, dir) {
 		name := s.Name
 		if s.Name == ScopeBranch {
 			b, _ := git(cwd, "branch", "--show-current")
 			name += " " + b
 		}
-		parts = append(parts, fmt.Sprintf("%s %d", name, len(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)))))
+		n := len(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)))
+		total += n
+		parts = append(parts, fmt.Sprintf("%s %d", name, n))
+	}
+	if total == 0 {
+		return ""
 	}
 	return "scoped pins: " + strings.Join(parts, " | ")
 }
