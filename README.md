@@ -19,6 +19,8 @@ Pins, decisions and recent prompts that survive context compaction in Claude Cod
 | `PIN@repo:` | every session and branch of this repo; never pruned | kept |
 | `PIN@global:` | every repo | kept |
 
+`PROMOTE: <id or text>` moves a pin into the repo's `AGENTS.md` (else `CLAUDE.md`, or `promote_to`) under "Pinned rules (promoted from agent-ledger)" and unpins it. Nothing is committed; review with `git diff`.
+
 After `/clear`, kept pins, carried notes and scoped pins reach the model as `additionalContext`; the dropped list goes only to you. `agent-ledger status` counts the scoped pins and `agent-ledger preview clear` shows what a `/clear` would drop, keep and carry.
 
 ## Install (Claude Code)
@@ -46,7 +48,8 @@ On the first hook, `bin/agent-ledger` fetches the binary for your OS/arch from t
 Layers, later wins: defaults < user `~/.config/agent-ledger/config.json` (`%APPDATA%` on Windows) < repo `.agent-ledger.json` (commit it to share with the team) < env `AGENT_LEDGER_<KEY>`.
 
 ```json
-{ "key": "session", "clear": "drop", "prune_days": 30, "recent_prompts": 5, "decisions": 10, "budget_chars": 16000 }
+{ "key": "session", "clear": "drop", "prune_days": 30, "recent_prompts": 5, "decisions": 10, "budget_chars": 16000,
+  "logging": "all", "redact": "on" }
 ```
 
 | Key | Values | Meaning |
@@ -56,6 +59,9 @@ Layers, later wins: defaults < user `~/.config/agent-ledger/config.json` (`%APPD
 | `prune_days` | 0-36500 | Delete ledgers idle this long at startup; 0 = never |
 | `recent_prompts`, `decisions` | 0-100, 0-200 | How many are re-injected after compact |
 | `budget_chars` | 1000-400000 | Injection budget; pins are never cut |
+| `logging` | `all` (default), `pins-only`, `off` | Which prompts are stored; pins are always kept |
+| `redact` | `on` (default), `off` | Mask API keys, tokens, private keys, JWTs, URL passwords and `password=`-style values before storing |
+| `promote_to` | a file name like `RULES.md` | Target of `PROMOTE:` (top of the work tree; no paths) |
 
 Bad files, unknown keys and invalid values are ignored; `agent-ledger config` shows each effective value, where it came from and any problem. `agent-ledger preview [compact|clear|startup|resume]` shows what the next SessionStart would inject, drop or prune, without doing it.
 

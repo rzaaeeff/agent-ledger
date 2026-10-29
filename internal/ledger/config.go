@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -35,6 +36,9 @@ type Config struct {
 	RecentPrompts int    `json:"recent_prompts"` // prompts re-injected after compact
 	Decisions     int    `json:"decisions"`      // decisions re-injected after compact
 	BudgetChars   int    `json:"budget_chars"`   // injection budget (pins are never cut)
+	Logging       string `json:"logging"`        // all | pins-only | off: which prompts are logged
+	Redact        string `json:"redact"`         // on | off: mask secrets before storing
+	PromoteTo     string `json:"promote_to"`     // file PROMOTE: appends to; "" = AGENTS.md, else CLAUDE.md
 
 	Source   map[string]string `json:"-"` // field -> where its value came from
 	Problems []string          `json:"-"` // ignored keys and values
@@ -45,8 +49,12 @@ type field struct {
 	str           *string
 	num           *int
 	allowed       []string
+	pattern       *regexp.Regexp // free strings: must match
 	minimum, maxi int
 }
+
+// promoteRe: a plain Markdown file name at the top of the work tree, no paths.
+var promoteRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}\.md$`)
 
 func (c *Config) fields() []field {
 	return []field{
@@ -56,13 +64,16 @@ func (c *Config) fields() []field {
 		{name: "recent_prompts", num: &c.RecentPrompts, minimum: 0, maxi: 100},
 		{name: "decisions", num: &c.Decisions, minimum: 0, maxi: 200},
 		{name: "budget_chars", num: &c.BudgetChars, minimum: 1000, maxi: 400000},
+		{name: "logging", str: &c.Logging, allowed: []string{"all", "pins-only", "off"}},
+		{name: "redact", str: &c.Redact, allowed: []string{"on", "off"}},
+		{name: "promote_to", str: &c.PromoteTo, pattern: promoteRe},
 	}
 }
 
 // DefaultConfig is today's behaviour.
 func DefaultConfig() Config {
 	c := Config{Key: KeySession, PruneDays: PruneDays, RecentPrompts: RecentPrompts,
-		Decisions: RecentDecs, BudgetChars: Budget, Source: map[string]string{}}
+		Decisions: RecentDecs, BudgetChars: Budget, Logging: "all", Redact: "on", Source: map[string]string{}}
 	for _, f := range c.fields() {
 		c.Source[f.name] = "default"
 	}
@@ -177,6 +188,16 @@ func (c *Config) layerFile(path string) {
 
 func (c *Config) set(f field, v, from string) {
 	v = strings.TrimSpace(v)
+	if f.pattern != nil {
+		if f.pattern.MatchString(v) {
+			*f.str = v
+			c.Source[f.name] = from
+			return
+		}
+		v, _ = cut(v, 40)
+		c.Problems = append(c.Problems, fmt.Sprintf("%s: %s=%q ignored (want a file name like AGENTS.md)", from, f.name, v))
+		return
+	}
 	if f.str != nil {
 		for _, a := range f.allowed {
 			if strings.EqualFold(v, a) {
@@ -206,6 +227,9 @@ func (c Config) Describe() string {
 		v := ""
 		if f.str != nil {
 			v = *f.str
+			if v == "" {
+				v = "(auto)"
+			}
 		} else {
 			v = strconv.Itoa(*f.num)
 		}
