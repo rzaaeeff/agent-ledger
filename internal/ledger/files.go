@@ -53,7 +53,9 @@ func MkdirPrivate(dir string) error { return os.MkdirAll(dir, 0o700) }
 // withLock runs fn holding an exclusive lock on path+".lock", so parallel hooks
 // never interleave or lose writes.
 func withLock(path string, fn func() error) error {
-	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	// Not O_APPEND: on Windows that opens with FILE_APPEND_DATA only, and LockFileEx
+	// needs GENERIC_READ or GENERIC_WRITE on the handle.
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
