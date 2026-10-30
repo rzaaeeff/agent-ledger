@@ -46,6 +46,14 @@ jobs:
 
           tested=false
           for s in $shas; do
+            # A run started by hand just before the merge is probably still
+            # going. Wait for it rather than start the same matrix again.
+            id=$(gh run list --workflow ci.yml --commit "$s" --json databaseId,status \
+              --jq 'map(select(.status != "completed"))|.[0].databaseId // empty' || true)
+            if [ -n "$id" ]; then
+              echo "waiting for ci run $id, already testing this code" >>"$GITHUB_STEP_SUMMARY"
+              timeout 900 gh run watch "$id" >/dev/null 2>&1 || true
+            fi
             n=$(gh run list --workflow ci.yml --commit "$s" --status success \
               --json databaseId --jq 'length' || echo 0)
             if [ "$n" -gt 0 ]; then
