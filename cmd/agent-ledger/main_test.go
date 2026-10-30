@@ -175,7 +175,7 @@ func exists(p string) bool { _, err := os.Lstat(p); return err == nil }
 func TestHooksSurviveBadInput(t *testing.T) {
 	setup(t)
 	for _, in := range []string{"", "not json", "{}", `{"prompt":""}`, `{"prompt":"x","cwd":"/nonexistent"}`, `{"prompt":123}`, `[1,2]`, `{"cwd":5,"session_id":{}}`} {
-		for _, h := range []string{"user-prompt-submit", "session-start", "session-end", "unknown"} {
+		for _, h := range []string{"user-prompt-submit", "user-prompt-expansion", "session-start", "session-end", "unknown"} {
 			out, errs, rc := cli(in, "hook", h)
 			if rc != 0 || errs != "" || (h != "session-start" && out != "") {
 				t.Errorf("hook %s with %q: rc=%d out=%q err=%q", h, in, rc, out, errs)
@@ -1795,5 +1795,104 @@ func TestCarryWithMoreLines(t *testing.T) {
 	}
 	if got := pinTexts(t, filepath.Join(e.dir("s1"), "pinned.jsonl")); len(got) != 1 || got[0] != "next task is the parser|carry" {
 		t.Errorf("CARRY text: %v", got)
+	}
+}
+
+func TestSlashCommands(t *testing.T) {
+	e := setup(t)
+	pins := filepath.Join(e.dir("s1"), "pinned.jsonl")
+	slash := func(name, args, src string) string {
+		in := m{"cwd": e.repo, "session_id": "s1", "command_name": name, "command_args": args, "prompt": "/" + name + " " + args}
+		if src != "" {
+			in["command_source"] = src
+		}
+		out, _, _ := cli(in, "hook", "user-prompt-expansion")
+		return out
+	}
+	// Every slash form blocks, with the reason only for the user.
+	upe := func(out string) string {
+		t.Helper()
+		var v struct {
+			Decision, Reason   string
+			HookSpecificOutput map[string]any
+		}
+		if json.Unmarshal([]byte(out), &v) != nil || v.Decision != "block" ||
+			v.HookSpecificOutput["hookEventName"] != "UserPromptExpansion" || v.HookSpecificOutput["suppressOriginalPrompt"] != true || len(v.HookSpecificOutput) != 2 {
+			t.Fatalf("want a UserPromptExpansion block, got %q", out)
+		}
+		return v.Reason
+	}
+	if r := upe(slash("agent-ledger:pin", "use pnpm", "plugin")); !strings.Contains(r, "pinned [") {
+		t.Errorf("/pin: %q", r)
+	}
+	upe(slash("agent-ledger:pin", "! keep me", "plugin"))
+	if r := upe(slash("agent-ledger:pin", "@repo repo rule", "")); !strings.Contains(r, "for this repo") {
+		t.Errorf("/pin @repo: %q", r)
+	}
+	if r := upe(slash("agent-ledger:pin", "@brnch x", "plugin")); !strings.Contains(r, "no @brnch") {
+		t.Errorf("/pin @typo: %q", r)
+	}
+	if r := upe(slash("agent-ledger:pin", "two\nlines", "plugin")); !strings.Contains(r, "takes one line") {
+		t.Errorf("multi-line /pin: %q", r)
+	}
+	if got := strings.Join(pinTexts(t, pins), ","); got != "use pnpm|,keep me|keep" {
+		t.Errorf("stored: %s", got)
+	}
+	for _, name := range []string{"agent-ledger:pin", "agent-ledger:pins"} {
+		if r := upe(slash(name, "", "plugin")); !strings.Contains(r, "use pnpm") || !strings.Contains(r, "repo rule") {
+			t.Errorf("%s alone must list pins: %q", name, r)
+		}
+	}
+	if r := upe(slash("agent-ledger:unpin", "pnpm", "plugin")); !strings.Contains(r, "unpinned") {
+		t.Errorf("/unpin: %q", r)
+	}
+	if r := upe(slash("agent-ledger:help", "", "plugin")); !strings.Contains(r, "PIN") {
+		t.Errorf("/agent-ledger:help: %q", r)
+	}
+	// Someone else's /pin is left alone, in both hooks.
+	for _, c := range [][2]string{{"pin", "userSettings"}, {"agent-ledger:pin", "userSettings"}, {"other:pin", "plugin"}, {"agent-ledger:nope", "plugin"}} {
+		if out := slash(c[0], "x", c[1]); out != "" {
+			t.Errorf("%v must be ignored: %q", c, out)
+		}
+	}
+	// A bad scope must not drain the model's pending notices.
+	e.say("PIN: drained?", "s1")
+	if r := upe(slash("agent-ledger:pin", "@my-repo x", "plugin")); !strings.Contains(r, "nothing saved") {
+		t.Errorf("/pin @bad-scope: %q", r)
+	}
+	if out := e.say("/review this", "s1"); !strings.Contains(out, "drained?") {
+		t.Errorf("another slash command must still get the pending notices: %q", out)
+	}
+	e.say("PIN: still pending", "s1")
+	if out := e.say("/pin from submit", "s1"); out != "" || strings.Contains(strings.Join(pinTexts(t, pins), ","), "from submit") {
+		t.Errorf("UserPromptSubmit must ignore /pin: %q", out)
+	}
+	if out := e.say("hello", "s1"); !strings.Contains(out, "still pending") {
+		t.Errorf("/pin must leave notices for the next prompt: %q", out)
+	}
+
+	// Codex: $pin and $agent-ledger:pin at the start of a prompt.
+	codex := func(p string) string {
+		out, _, _ := cli(m{"cwd": e.repo, "session_id": "c1", "turn_id": "t", "prompt": p}, "hook", "user-prompt-submit")
+		return out
+	}
+	for _, p := range []string{"$pin codex rule", "$agent-ledger:pin second rule", "$PINS"} {
+		if r := blockMsg(t, codex(p)); strings.Contains(r, "nothing") {
+			t.Errorf("%s: %q", p, r)
+		}
+		if out := codex(p); strings.Contains(out, "suppressOriginalPrompt") {
+			t.Errorf("Codex output must not have suppressOriginalPrompt: %s", out)
+		}
+	}
+	if r := blockMsg(t, codex("$pin a\nb")); !strings.Contains(r, "takes one line") {
+		t.Errorf("multi-line $pin: %q", r)
+	}
+	for _, p := range []string{"talk about $pin later", "$pinata", "$help"} {
+		if strings.Contains(codex(p), `"decision"`) {
+			t.Errorf("%q is not a command", p)
+		}
+	}
+	if got := strings.Join(pinTexts(t, filepath.Join(e.dir("c1"), "pinned.jsonl")), ","); got != "codex rule|,second rule|" {
+		t.Errorf("Codex stored: %s", got)
 	}
 }

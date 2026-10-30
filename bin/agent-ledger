@@ -99,13 +99,19 @@ if [ ! -x "$bin" ]; then
     wait_min=5; [ -s "$failed" ] && wait_min=60
     if [ -n "$(find "$failed" -maxdepth 0 -mmin +$wait_min 2>/dev/null)" ]; then mv -f "$failed" "$failed.prev" 2>/dev/null; fi
     input=""
-    [ "${2-}" = user-prompt-submit ] && input="$(cat)"
+    case "${2-}" in user-prompt-submit | user-prompt-expansion) input="$(cat)" ;; esac
     # A ledger command must not reach the model unhandled: block it, so the text
     # stays in the input box to send again. Other prompts go on.
     say() {
       set -- "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')" "${2-}" "${3-}"
+      # A slash command: block only our own (the expansion would reach the model), stay quiet for others.
+      if [ "${2-}" = user-prompt-expansion ]; then
+        printf '%s' "$input" | grep -q '"command_name"[[:space:]]*:[[:space:]]*"agent-ledger:' &&
+          printf '{"decision":"block","reason":"%s This command was not saved; send it again%s.","hookSpecificOutput":{"hookEventName":"UserPromptExpansion","suppressOriginalPrompt":true}}\n' "$1" "$3"
+        return
+      fi
       if [ "${2-}" = user-prompt-submit ] && printf '%s' "$input" |
-        grep -qiE '"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(pin|carry|unpin|promote)!?([[:space:]]*@[a-z]+)?!?([[:space:]]*\[[^]"]*\])?[[:space:]]*(:|：)|"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(pins|ledger)\?[[:space:]]*"'; then
+        grep -qiE '"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(pin|carry|unpin|promote)!?([[:space:]]*@[a-z]+)?!?([[:space:]]*\[[^]"]*\])?[[:space:]]*(:|：)|"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(pins|ledger)\?[[:space:]]*"|"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*\$(agent-ledger:)?(pin|pins|unpin|carry|promote|help)([[:space:]]|\\n|")'; then
         extra=',"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}'
         printf '%s' "$input" | grep -q '"turn_id"' && extra=""
         printf '{"decision":"block","reason":"%s This command was not saved; send it again%s."%s}\n' "$1" "$3" "$extra"
@@ -117,7 +123,7 @@ if [ ! -x "$bin" ]; then
       [ -s "$failed" ] && wait_min=60 || wait_min=5
       msg="$name v$version missing; last download failed, retrying in $wait_min minutes"
       case "${2-}" in
-        user-prompt-submit | session-start)
+        user-prompt-submit | user-prompt-expansion | session-start)
           say "agent-ledger is not working: downloading its binary failed (see $state/skips.log). It retries in $wait_min minutes; to retry now, delete $failed." "${2-}" " once agent-ledger works" ;;
       esac
       fail hook
@@ -149,7 +155,7 @@ if [ ! -x "$bin" ]; then
     msg="$name missing; fetching v$version in the background"
     # The hook output must stay valid JSON.
     case "${2-}" in
-      user-prompt-submit) say "agent-ledger is still installing (one-time download); this prompt was not recorded." "${2-}" " in a few seconds" ;;
+      user-prompt-submit | user-prompt-expansion) say "agent-ledger is still installing (one-time download); this prompt was not recorded." "${2-}" " in a few seconds" ;;
       session-start) say "agent-ledger: downloading its binary in the background (one time)." ;;
     esac
     fail hook

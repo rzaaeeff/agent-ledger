@@ -51,6 +51,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		switch args[1] {
 		case "user-prompt-submit":
 			ledger.HookUserPromptSubmit(h, stdout)
+		case "user-prompt-expansion":
+			ledger.HookUserPromptExpansion(h, stdout)
 		case "session-start":
 			ledger.HookSessionStart(h, stdout)
 		case "session-end":
