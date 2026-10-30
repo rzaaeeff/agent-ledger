@@ -284,7 +284,7 @@ func codexWhere(where string, codex bool) string {
 func CodexClearNote(pins []located) string {
 	for _, p := range pins {
 		if p.Life == LifeKeep || p.Life == LifeCarry {
-			return "\nNote: Codex starts a chat it cannot link, so PIN! and CARRY items do not arrive after /clear there. Use PIN@branch: or PIN@repo: instead."
+			return "\nNote: Codex starts a chat it cannot link to this one, so PIN! and CARRY items do not arrive after /clear. Use a scope that does: PIN@repo:, PIN@branch: or PIN@global:."
 		}
 	}
 	return ""

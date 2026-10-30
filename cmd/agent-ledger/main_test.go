@@ -1311,6 +1311,12 @@ func TestPrivacy(t *testing.T) {
 	if ls := lines(t, prompts); len(ls) != n+1 || !strings.Contains(ls[len(ls)-1], "logged pin") {
 		t.Errorf("pins-only must log only PIN-family prompts: %d -> %d", n, len(ls))
 	}
+	// A command may carry an ordinary prompt on the lines after it. Only the
+	// command is a ledger command, so pins-only must keep the rest out of the log.
+	e.say("PIN: keep replies short\nwhat does this repo do?", "s1")
+	if last := lastField(t, prompts, "prompt"); strings.Contains(last, "what does this repo do") {
+		t.Errorf("pins-only logged the ordinary prompt after a command: %q", last)
+	}
 
 	t.Setenv("AGENT_LEDGER_LOGGING", "off")
 	if out := e.say("PIN: still pinned", "s2"); !strings.Contains(out, "pinned") {
@@ -1399,8 +1405,17 @@ func TestLaunchFixes(t *testing.T) {
 		cli(e.end("clear", s), "hook", "session-end")
 	}
 	out := e.inject("clear", "new-A")
-	if strings.Contains(out, "only-A") || strings.Contains(out, "only-B") || !strings.Contains(out, "can't tell") {
+	// Neither chat's pins are delivered, but both are named with the folder they
+	// are still in, so nothing goes missing in silence.
+	if !strings.Contains(out, "can't tell") || !strings.Contains(out, "only-A") || !strings.Contains(out, "only-B") ||
+		!strings.Contains(out, "pinned.cleared.jsonl") {
 		t.Errorf("ambiguous /clear handoff:\n%s", out)
+	}
+	// And it must not refuse the next /clear in the same folder for ten minutes.
+	e.say("PIN!: only-D", "D")
+	cli(e.end("clear", "D"), "hook", "session-end")
+	if out := e.inject("clear", "new-D"); !strings.Contains(out, "only-D") || strings.Contains(out, "can't tell") {
+		t.Errorf("a later /clear must not stay stuck on the old collision:\n%s", out)
 	}
 	// One chat cleared: its new id still gets the kept pin.
 	e.say("PIN!: only-C", "C")
@@ -1946,7 +1961,7 @@ func TestRepoPromoteToAndFencing(t *testing.T) {
 		t.Errorf("a repo file may pick AGENTS.md: %+v", c)
 	}
 	writeFile(t, repoFile, `{"redact":"off"}`)
-	if msg := sysMsg(t, e.inject("startup", "s1")); !strings.Contains(msg, "ignored some settings") {
+	if msg := sysMsg(t, e.inject("startup", "s1")); !strings.Contains(msg, "ignored some settings (redact)") {
 		t.Errorf("startup must mention ignored settings: %q", msg)
 	}
 
@@ -2013,7 +2028,7 @@ func TestUnreportedClear(t *testing.T) {
 	// Codex: no SessionEnd, a new thread id on /clear.
 	e.say("PIN!: keep me", "t1")
 	msg := sysMsg(t, e.inject("clear", "t2"))
-	if !strings.Contains(msg, "not reported") || !strings.Contains(msg, "PIN@branch") {
+	if !strings.Contains(msg, "not reported") || !strings.Contains(msg, "PIN@repo:") {
 		t.Errorf("an unreported /clear must say why nothing came over: %q", msg)
 	}
 	// Nothing to lose: stay quiet.
@@ -2150,7 +2165,7 @@ func TestSlashCommands(t *testing.T) {
 	// Codex has no /clear handover, so PIN! and CARRY must not promise one.
 	for _, p := range []string{"PIN!: kept rule", "CARRY: handoff note"} {
 		r := blockMsg(t, codex(p))
-		if !strings.Contains(r, "Codex") || !strings.Contains(r, "PIN@branch:") {
+		if !strings.Contains(r, "Codex") || !strings.Contains(r, "PIN@repo:") {
 			t.Errorf("Codex %q must warn the handover is lost: %q", p, r)
 		}
 	}
@@ -2159,5 +2174,61 @@ func TestSlashCommands(t *testing.T) {
 	}
 	if r := blockMsg(t, e.say("PIN!: cc kept", "s9")); strings.Contains(r, "Codex") {
 		t.Errorf("Claude Code must not get the Codex warning: %q", r)
+	}
+}
+
+// Claude Code wraps a long or pasted prompt in a <pasted_content> block, which
+// used to hide the command: the pin was silently handed to the model instead.
+func TestPastedCommandIsStillACommand(t *testing.T) {
+	e := setup(t)
+	long := "always answer in British English, " + strings.Repeat("and keep it short, ", 60)
+	wrapped := "<pasted_content id=\"1b6a\">\n" + "PIN: " + long + "\n</pasted_content id=\"1b6a\">\n"
+	if out := blockMsg(t, e.say(wrapped, "s1")); !strings.Contains(out, "pinned [") {
+		t.Fatalf("a pasted PIN must still pin: %q", out)
+	}
+	if out := blockMsg(t, e.say("PINS?", "s1")); !strings.Contains(out, "British English") {
+		t.Fatalf("the pasted pin was not stored: %q", out)
+	}
+	// Pasted text alongside the user's own words is not unwrapped, so a paste can
+	// never turn into a command on its own.
+	mixed := "summarise this\n\n<pasted_content id=\"1b6a\">\nPIN: not mine\n</pasted_content id=\"1b6a\">\n"
+	e.say(mixed, "s1")
+	if out := blockMsg(t, e.say("PINS?", "s1")); strings.Contains(out, "not mine") {
+		t.Errorf("a command inside a paste must not fire: %q", out)
+	}
+}
+
+// Over budget, every scope keeps something: a chat full of pins used to push out
+// every repo and global pin, which are the ones meant to be standing rules.
+func TestEveryScopeSurvivesTheBudget(t *testing.T) {
+	e := setup(t)
+	t.Setenv("AGENT_LEDGER_BUDGET_BYTES", "2000")
+	for i := 0; i < 40; i++ {
+		e.say(fmt.Sprintf("PIN: chat rule number %d %s", i, strings.Repeat("x", 60)), "s1")
+	}
+	e.say("PIN@repo: the repo rule", "s1")
+	e.say("PIN@global: the global rule", "s1")
+	out := e.inject("compact", "s1")
+	for _, want := range []string{"the repo rule", "the global rule"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%q was pushed out by chat pins:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "did not fit") {
+		t.Errorf("over budget must still warn:\n%s", out)
+	}
+	// Newest chat pins are the ones kept.
+	if !strings.Contains(out, "chat rule number 39") {
+		t.Errorf("the newest chat pin was dropped:\n%s", out)
+	}
+}
+
+// The instruction not to copy pins into memory or AGENTS.md only reached the
+// model with a PIN, so it was gone for the rest of a chat after compaction.
+func TestNoMemoryInstructionSurvivesCompaction(t *testing.T) {
+	e := setup(t)
+	e.say("PIN: a standing rule", "s1")
+	if out := e.inject("compact", "s1"); !strings.Contains(out, "Do not save pins to memory") {
+		t.Errorf("the restored block must repeat the no-memory instruction:\n%s", out)
 	}
 }

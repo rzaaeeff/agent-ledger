@@ -95,7 +95,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "config":
 		cwd, _ := os.Getwd()
 		fmt.Fprintln(stdout, ledger.LoadConfig(cwd).Describe())
-		fmt.Fprintln(stdout, "files: user", ledger.UserConfigPath()+", repo", ledger.RepoConfigPath(cwd))
+		// Say which of the two files are actually there: the list read as if both
+		// existed, so a setting looked ignored rather than never written.
+		for _, f := range []struct{ what, path string }{{"user", ledger.UserConfigPath()}, {"repo", ledger.RepoConfigPath(cwd)}} {
+			state := "not present"
+			if _, err := os.Stat(f.path); err == nil {
+				state = "read"
+			}
+			fmt.Fprintf(stdout, "file: %s %s (%s)\n", f.what, f.path, state)
+		}
 		return 0
 	case "preview":
 		source := "compact"

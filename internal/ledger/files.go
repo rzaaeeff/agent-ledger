@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -47,8 +48,27 @@ func Marshal(v any) []byte {
 	return bytes.TrimRight(b.Bytes(), "\n")
 }
 
-// MkdirPrivate creates dir (and parents) readable by the owner only.
-func MkdirPrivate(dir string) error { return os.MkdirAll(dir, 0o700) }
+// MkdirPrivate creates dir (and parents) readable by the owner only, and tightens
+// anything already there: another tool may have made the state folder first, with
+// its own umask, and MkdirAll leaves an existing folder's mode alone.
+func MkdirPrivate(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	home := StateHome()
+	for p := dir; strings.HasPrefix(p, home); p = filepath.Dir(p) {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().Perm()&0o077 != 0 {
+			_ = os.Chmod(p, fi.Mode().Perm()&^0o077)
+		}
+		if p == home {
+			break
+		}
+	}
+	return nil
+}
 
 // withLock runs fn holding an exclusive lock on path+".lock", so parallel hooks
 // never interleave or lose writes.

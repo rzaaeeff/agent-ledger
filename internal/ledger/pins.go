@@ -148,6 +148,25 @@ func nearMiss(prompt string) string {
 	return fmt.Sprintf("ledger: nothing saved; this went to the agent as a normal prompt. Commands need the colon: %s ... (LEDGER? lists them)", want)
 }
 
+// pastedRe matches a whole prompt that Claude Code wrapped as one pasted block.
+// Since 2.1.x it wraps any paste of 20 characters or more (and a fast-typed line
+// counts) as <pasted_content id="ID">\n...\n</pasted_content id="ID">, so a long
+// PIN: no longer started with "PIN" and was silently handed to the model instead.
+// The closing tag repeats the id, which is not well-formed XML, so match it exactly.
+var pastedRe = regexp.MustCompile(`(?s)\A<pasted_content id="([^"\n]*)">\n(.*)\n</pasted_content id="([^"\n]*)">\z`)
+
+// Unwrap returns the contents of a prompt that is nothing but one pasted block,
+// else the prompt unchanged. Only a lone block is unwrapped: when the user pastes
+// something alongside their own words, the words come first and are parsed as they
+// always were, so pasted text can never turn into a command on its own.
+func Unwrap(prompt string) string {
+	m := pastedRe.FindStringSubmatch(strings.TrimSpace(prompt))
+	if m == nil || m[1] != m[3] || strings.Contains(m[2], "<pasted_content id=\"") {
+		return prompt
+	}
+	return m[2]
+}
+
 // parsePin recognises PIN:, PIN!:, PIN@<scope>:, PIN [ref]:, CARRY:, UNPIN: and
 // PROMOTE: at the start of a prompt, after any spaces, in any case. Only the start
 // counts, so prose mentioning "pin:" is left alone. The command's text is its

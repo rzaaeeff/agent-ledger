@@ -124,7 +124,7 @@ if [ ! -x "$bin" ]; then
         return
       fi
       if [ "${2-}" = user-prompt-submit ] && printf '%s' "$input" |
-        grep -qiE '"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(pin|carry|unpin|promote)!?([[:space:]]*@[a-z]+)?!?([[:space:]]*\[[^]"]*\])?[[:space:]]*(:|：)|"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(pins|ledger)\?[[:space:]]*"|"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*\$(agent-ledger:)?(pin|pins|unpin|carry|promote|help)([[:space:]]|\\n|")'; then
+        grep -qiE '"prompt"[[:space:]]*:[[:space:]]*"(<pasted_content[^>]*>\\n)?[[:space:]]*(pin|carry|unpin|promote)!?([[:space:]]*@[a-z]+)?!?([[:space:]]*\[[^]"]*\])?[[:space:]]*(:|：)|"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(pins|ledger)\?[[:space:]]*"|"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*\$(agent-ledger:)?(pin|pins|unpin|carry|promote|help)([[:space:]]|\\n|")'; then
         extra=',"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}'
         printf '%s' "$input" | grep -q '"turn_id"' && extra=""
         printf '{"decision":"block","reason":"%s This command was not saved; send it again%s."%s}\n' "$1" "$3" "$extra"
