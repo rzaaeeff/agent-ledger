@@ -14,7 +14,7 @@ PIN: don't touch the migrations, the schema is frozen until Friday
 
 After `/compact`, the agent sees that pin again, word for word, and you get a one-line note saying what was restored.
 
-**Status: v0.1, early.** Tested live on Claude Code 2.1.314 (Linux) and 2.1.284 (Windows, Git Bash), and Codex 0.164 and 0.166 (Linux); CI runs the tests on Linux, macOS and Windows. That is one person's runs, not wide use: please report what breaks.
+**Status: v0.2, early.** CI runs the tests on Linux, macOS and Windows. The agent integration was exercised live on Claude Code 2.1.314 (Linux) and 2.1.284 (Windows, Git Bash), and Codex 0.164 and 0.166 (Linux), at v0.1; v0.2 changed which ledger a folder gets, and that part is covered by tests and direct runs of the binary rather than a fresh pass through every agent. One person's runs either way, not wide use: please report what breaks.
 
 ## Is it for you?
 
@@ -45,7 +45,7 @@ codex plugin add agent-ledger@agent-ledger
 
 then start Codex and, at "Hooks need review", trust the agent-ledger hooks. Each update asks again.
 
-On first use the plugin downloads one binary (about 3 MB) from the GitHub release; your first prompt waits a few seconds for it. It works only inside a git repository. Requirements, checksums and failure handling are under [How the install works](#how-the-install-works).
+On first use the plugin downloads one binary (about 3 MB) from the GitHub release; your first prompt waits a few seconds for it. Requirements, checksums and failure handling are under [How the install works](#how-the-install-works).
 
 ## Using it
 
@@ -56,14 +56,14 @@ Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 | `PIN:` | this chat | dropped; you get a list of what was dropped (kept if `key` is `branch` or `repo`) |
 | `PIN!:` | this chat | kept |
 | `CARRY:` | the next chat after `/clear`, once | handed over, then deleted |
-| `PIN@branch:` | every chat on this branch (refused on `main`, `master`, the default branch and a detached HEAD) | kept |
-| `PIN@repo:` | every chat in this repo | kept |
+| `PIN@branch:` | every chat on this branch (refused on `main`, `master`, the default branch, a detached HEAD, and outside a repo) | kept |
+| `PIN@repo:` | every chat in this repo, or in this folder when it is not a repo | kept |
 | `PIN@global:` | every chat in every repo | kept |
 | `PINS?` | lists your pins with numbers; only you see it, the agent gets nothing | |
 | `LEDGER?` | the cheat sheet and what's stored; only you see it | |
 | `PIN [ref]: <new text>` | rewords a pin; it keeps its scope and lifetime | |
 | `UNPIN: <ref>` | removes a pin | |
-| `PROMOTE: <ref>` | moves a pin into `CLAUDE.md` or `AGENTS.md` (see `promote_to`), uncommitted | |
+| `PROMOTE: <ref>` | moves a pin into `CLAUDE.md` or `AGENTS.md` (see `promote_to`), uncommitted; needs a repo | |
 
 `PIN!:` and `CARRY:` are easy to mix up. A pin is a rule, so it is put back after every compaction until you `UNPIN` it. `CARRY:` is a note about where you left off, delivered once into the next chat and then deleted, which is why `PINS?` never lists it. Pinning "the auth refactor is half done" would still be telling the model that next week, long after it stopped being true.
 
@@ -94,7 +94,7 @@ agent-ledger status
 agent-ledger preview          # or: preview clear
 ```
 
-Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): Claude Code puts plugin `bin/` folders on its shell's PATH, and from a normal terminal there is no session id, so you'd see the branch ledger, not your chat's. In Codex, call the plugin's `bin/agent-ledger` by full path. Both find the binary under `CLAUDE_CONFIG_DIR` or `CODEX_HOME` if you set them.
+Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): Claude Code puts plugin `bin/` folders on its shell's PATH, and from a normal terminal there is no session id, so you'd see the branch ledger (outside a repo, the one shared by the folder), not your chat's. In Codex, call the plugin's `bin/agent-ledger` by full path. Both find the binary under `CLAUDE_CONFIG_DIR` or `CODEX_HOME` if you set them.
 
 ## Why not `CLAUDE.md`, or a five-line hook?
 
@@ -129,9 +129,15 @@ By default each chat has its own ledger, keyed by the session id Claude Code or 
 
 After `/clear`, Claude Code starts a new session id. Your `PIN!:` pins and `CARRY:` items move to it only if exactly one chat in the same folder was cleared in the last 10 minutes. If several were, or the end-of-chat hook didn't run, nothing moves and you are told. A forked chat starts its own ledger (it sees branch, repo and global pins, not the original chat's).
 
-Which repo you are in is decided by the path of its `.git` directory, so two checkouts with the same name stay apart and a subdirectory uses the same ledger as the root. That path also names the ledger folder, so moving or renaming a repo starts an empty one. Nothing warns you: you just see "No pins here". The old pins are not lost, they sit under the old folder name in `~/.local/state/agent-ledger/` (`agent-ledger status` prints the path of the ledger in use, which shows you the naming). The idle cleanup only ever looks at the repo you are in, so that folder stays until you delete it: copy anything you still want, or pin it again.
+Which repo you are in is decided the first time you pin: a file named `agent-ledger-id` is written inside that repo's `.git` directory and records which ledger folder is yours. Git never shows that file in `git status`, and `git clone` does not copy it, so a clone starts its own ledger. All worktrees of a repo share one, and a subdirectory uses the same ledger as the root. Because the ledger is named by that file rather than by where the repo sits, moving or renaming the repo keeps your pins.
 
-Without a hook session id (`status`, `preview`), the ledger comes from `CLAUDE_CODE_SESSION_ID`, `CLAUDE_SESSION_ID` or `CODEX_THREAD_ID`, else the current branch (`detached` on a detached HEAD). You get a warning when it falls back to the branch.
+**A folder that is not a repository** gets a ledger too, which is what makes a general chat that spans several repos usable. `PIN:`, `PIN!:`, `CARRY:`, `PINS?`, `UNPIN:`, `PIN@repo:` and `PIN@global:` all work there; `PIN@repo:` is worded as "this folder" and covers every chat in it. Two verbs still need a repository and say so: `PIN@branch:`, because there is no branch, and `PROMOTE:`, because there is no work tree to write `CLAUDE.md` into.
+
+A folder is known by its path, since the only place to put a marker would be the folder itself, where it would be a file you did not ask for and git would offer to commit. So moving a folder starts a new ledger, which is the 0.1.x behaviour. Entering a repository inside that folder switches to the repository's own ledger: the general chat and the repo chats stay separate, and `PIN@global:` is what both see.
+
+Two things start a fresh, empty ledger: deleting `.git` and running `git init` again, since the marker goes with it, and coming from 0.1.x, which named the ledger after the repo's path. Nothing is deleted in either case; the old pins stay under the old folder name in `~/.local/state/agent-ledger/`. If `.git` is read-only the marker cannot be written and that repo falls back to being known by its path, which is the 0.1.x behaviour: pinning still works, but a move loses the pins. `agent-ledger status` prints the ledger folder in use, and the idle cleanup only looks at the repo you are in, so any folder left behind stays until you delete it.
+
+Without a hook session id (`status`, `preview`), the ledger comes from `CLAUDE_CODE_SESSION_ID`, `CLAUDE_SESSION_ID` or `CODEX_THREAD_ID`, else the current branch (`detached` on a detached HEAD), or outside a repo the one ledger shared by the folder. You get a warning naming whichever it fell back to.
 
 ## Configuration
 
@@ -156,7 +162,7 @@ Invalid values are ignored and listed by `agent-ledger config`.
 
 ## How the install works
 
-On first use the plugin downloads one binary (about 3 MB) for your OS from the GitHub release into the plugin's data folder (`~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). Your first prompt waits up to a few seconds for the download. If it isn't done by then, you see "still installing": that prompt is not recorded, and a ledger command is blocked so you can send it again. If the download fails, you are told on each prompt, with the path of a marker file you can delete to retry at once; otherwise it retries after 5 minutes, then hourly. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere a `PIN:` tells you so).
+On first use the plugin downloads one binary (about 3 MB) for your OS from the GitHub release into the plugin's data folder (`~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). Your first prompt waits up to a few seconds for the download. If it isn't done by then, you see "still installing": that prompt is not recorded, and a ledger command is blocked so you can send it again. If the download fails, you are told on each prompt, with the path of a marker file you can delete to retry at once; otherwise it retries after 5 minutes, then hourly. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`.
 
 Your normal prompts are never blocked. Slash commands, `PIN:`, `PINS?`, `LEDGER?`, `CARRY:`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about new, removed or changed pins with your next prompt. In Claude Code the command stays in the input box after the reply; clear it (Ctrl+U) before typing on. If the download fails, the reason goes to `skips.log` in `~/.local/state/agent-ledger/` (or `$XDG_STATE_HOME/agent-ledger/`). If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 
@@ -167,7 +173,7 @@ claude plugin marketplace update agent-ledger
 claude plugin update agent-ledger
 ```
 
-then restart Claude Code. The new binary is fetched on your next prompt, because each version keeps its own copy, so there is nothing else to run. Your pins are untouched by an update. In Codex, run `codex plugin marketplace update agent-ledger` and then the `codex plugin add` line again; it asks you to trust the hooks again.
+then restart Claude Code. The new binary is fetched on your next prompt, because each version keeps its own copy, so there is nothing else to run. An update leaves your pins alone, with one exception: 0.1.x named a repo's ledger after its path and 0.2 does not, so upgrading across that line starts an empty ledger. Nothing is deleted; see [How chats are told apart](#how-chats-are-told-apart) for where the old pins are. In Codex, run `codex plugin marketplace update agent-ledger` and then the `codex plugin add` line again; it asks you to trust the hooks again.
 
 ## Cost
 

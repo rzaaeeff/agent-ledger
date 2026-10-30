@@ -164,10 +164,10 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	cfg := LoadConfig(h.Cwd)
 	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
 	if err != nil {
+		// A folder with no repository gets its own ledger, so the only way here is
+		// git failing on a folder that does look like one.
 		why := "agent-ledger could not open its ledger: " + err.Error()
-		if err == ErrNoRepo {
-			why = "agent-ledger works only inside a git repository; this folder is not in one, so nothing is stored here."
-		} else if errors.Is(err, ErrNoRepo) {
+		if errors.Is(err, ErrNoRepo) {
 			why = "git could not open this folder as a repository, so nothing is stored here. " + strings.TrimPrefix(err.Error(), ErrNoRepo.Error()+"; ")
 		}
 		q := strings.TrimSpace(h.Prompt)
@@ -200,7 +200,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		block(out, msg)
 		return
 	case strings.EqualFold(q, "LEDGER?"):
-		block(out, HelpText(Status(dir)))
+		block(out, HelpText(Status(dir), IsFolder(filepath.Dir(dir))))
 		return
 	}
 	pinsHere := func() string { return brief(listPins(h.Cwd, dir, here)) }
@@ -302,6 +302,9 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			if codex {
 				where = " (kept across /clear in Claude Code only: Codex starts a chat it cannot link, so use PIN@branch: or PIN@repo: there)"
 			}
+		case cmd.scope == ScopeBranch && IsFolder(filepath.Dir(dir)):
+			emit(out, "PIN@branch refused: this folder is not in a git repository, so there is no branch. Use PIN: for this chat or PIN@repo: for this folder.")
+			return
 		case cmd.scope == ScopeBranch:
 			b, _ := git(h.Cwd, "branch", "--show-current")
 			if b == "" || DefaultBranches(h.Cwd)[b] {
@@ -315,6 +318,9 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			target, where = filepath.Join(filepath.Dir(dir), branchKey(b)), " for branch "+b
 		case cmd.scope == ScopeRepo:
 			target, where = filepath.Join(filepath.Dir(dir), RepoKey), " for this repo"
+			if IsFolder(filepath.Dir(dir)) {
+				where = " for this folder"
+			}
 		case cmd.scope == ScopeGlobal:
 			target, where = GlobalDir(), " for every repo"
 		}

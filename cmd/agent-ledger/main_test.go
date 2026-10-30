@@ -342,7 +342,9 @@ func TestBranchFallback(t *testing.T) {
 	}
 	e.checkout("main")
 	t.Chdir(t.TempDir())
-	if out, _, _ := cli(nil, "status"); out != "ledger: not in a git repository\n" {
+	// Outside a repo there is no branch to fall back to, so one ledger serves the
+	// folder's sessionless chats.
+	if out, _, _ := cli(nil, "status"); !strings.Contains(out, string(filepath.Separator)+"@dir-") || !strings.HasSuffix(strings.TrimSpace(out), ledger.RepoKey+")") {
 		t.Errorf("status outside a repo = %q", out)
 	}
 	if out, _, rc := cli(nil, "inject"); out != "" || rc != 0 {
@@ -683,6 +685,108 @@ func TestSameNamedReposStayApart(t *testing.T) {
 	sub, _ := ledger.Root(e.repo)
 	if sub != a {
 		t.Fatalf("root is not stable: %q vs %q", a, sub)
+	}
+}
+
+// copyRepo copies a repo, .git and all, to a fresh path. A copy carries the
+// marker exactly as a move does, so it is how these tests change a repo's path:
+// renaming the directory outright is unreliable on Windows, where a handle left
+// behind by a git subprocess keeps it "in use" long after the process is gone.
+func copyRepo(t *testing.T, from string) string {
+	t.Helper()
+	to := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.CopyFS(to, os.DirFS(from)); err != nil {
+		t.Fatalf("could not copy %s: %v", from, err)
+	}
+	return to
+}
+
+// A repo's pins used to be stranded by a move: the ledger name was derived from
+// the repo's path, so a new path meant a new, empty ledger. Now the repo carries
+// its own name, and the path it sits at no longer decides anything.
+func TestLedgerFollowsRepoMove(t *testing.T) {
+	e := setup(t)
+	if out := e.say("PIN: keep the schema in sync", "s1"); !strings.Contains(out, "pinned") {
+		t.Fatalf("pin not saved: %q", out)
+	}
+	moved := copyRepo(t, e.repo)
+	t.Chdir(moved)
+	out, _, _ := cli(m{"prompt": "PINS?", "cwd": moved, "session_id": "s1"}, "hook", "user-prompt-submit")
+	if !strings.Contains(out, "keep the schema in sync") {
+		t.Fatalf("pins lost after the repo moved: %q", out)
+	}
+	root, err := ledger.Root(moved)
+	if err != nil || root != e.root {
+		t.Fatalf("moved repo got ledger %q, want %q (%v)", root, e.root, err)
+	}
+}
+
+// Identity comes from the marker, not the path, so a repo that replaces another
+// one at the same path must not inherit its pins. Deleting .git and running git
+// init again takes the marker with it, which is the same thing from the inside.
+func TestNewRepoDoesNotInheritOldPath(t *testing.T) {
+	e := setup(t)
+	if out := e.say("PIN: secret from the first repo", "s1"); !strings.Contains(out, "pinned") {
+		t.Fatalf("pin not saved: %q", out)
+	}
+	// The copy stands in for the old repo moved aside: it keeps the pins, and
+	// nothing has ever opened its .git, so removing that is safe on Windows too.
+	moved := copyRepo(t, e.repo)
+	if err := os.RemoveAll(filepath.Join(moved, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	e.git("init", "-q", "-b", "main", moved)
+	fresh, err := ledger.Root(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh == e.root {
+		t.Fatalf("a new repo at the old path adopted the old repo's ledger %q", fresh)
+	}
+	out, _, _ := cli(m{"prompt": "PINS?", "cwd": moved, "session_id": "s1"}, "hook", "user-prompt-submit")
+	if strings.Contains(out, "secret from the first repo") {
+		t.Fatalf("new repo sees the other repo's pins: %q", out)
+	}
+}
+
+// The marker is a file in the repo, so a repo can carry a hostile one. It must
+// never point the ledger outside the store.
+func TestMarkerCannotEscapeTheStore(t *testing.T) {
+	e := setup(t)
+	store := filepath.Join(e.state, "agent-ledger")
+	for _, bad := range []string{"../../../../tmp/pwned", "..", ".", "/etc/passwd", "a/b", ""} {
+		writeFile(t, filepath.Join(e.repo, ".git", ledger.MarkerFile), bad)
+		root, err := ledger.Root(e.repo)
+		if err != nil {
+			t.Fatalf("marker %q broke the ledger: %v", bad, err)
+		}
+		parent, name := filepath.Split(filepath.Clean(root))
+		if filepath.Clean(parent) != store || name == "" || name == "." || name == ".." {
+			t.Fatalf("marker %q escaped the store: %q", bad, root)
+		}
+	}
+}
+
+// Identity is a convenience; it must never be the reason a pin is refused.
+func TestUnwritableRepoStillPins(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	e := setup(t)
+	gitDir := filepath.Join(e.repo, ".git")
+	if err := os.Remove(filepath.Join(gitDir, ledger.MarkerFile)); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(gitDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(gitDir, info.Mode()) })
+	if out := e.say("PIN: still works read only", "s1"); !strings.Contains(out, "pinned") {
+		t.Fatalf("a read-only git dir blocked a pin: %q", out)
 	}
 }
 
@@ -1636,6 +1740,8 @@ func TestNoticesReachTheModel(t *testing.T) {
 	}
 }
 
+// A chat that spans several repos lives in a plain folder. It still gets pins;
+// only the verbs that name a branch or a work tree have nothing to work with.
 func TestOutsideGitRepo(t *testing.T) {
 	setup(t)
 	d := t.TempDir()
@@ -1643,22 +1749,55 @@ func TestOutsideGitRepo(t *testing.T) {
 		out, _, _ := cli(map[string]string{"prompt": p, "cwd": d, "session_id": "s1"}, "hook", "user-prompt-submit")
 		return out
 	}
-	// A command alone must be blocked, or the agent is handed "PIN: x" to act on.
-	if msg := blockMsg(t, say("PIN: x")); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git repository") {
+	if msg := blockMsg(t, say("PIN: use the staging bucket")); !strings.Contains(msg, "pinned") {
 		t.Errorf("PIN outside git: %q", msg)
 	}
-	if msg := blockMsg(t, say("UNPIN: x")); !strings.Contains(msg, "git repository") {
+	if msg := blockMsg(t, say("PINS?")); !strings.Contains(msg, "use the staging bucket") {
+		t.Errorf("PINS? outside git: %q", msg)
+	}
+	// Folder-wide pins are what a chat covering several repos actually wants.
+	if msg := blockMsg(t, say("PIN@repo: ask before pushing")); !strings.Contains(msg, "for this folder") {
+		t.Errorf("PIN@repo outside git: %q", msg)
+	}
+	// There is no branch here, so say that rather than report a detached HEAD.
+	if msg := blockMsg(t, say("PIN@branch: x")); !strings.Contains(msg, "not in a git repository") || !strings.Contains(msg, "PIN@repo:") {
+		t.Errorf("PIN@branch outside git: %q", msg)
+	}
+	if msg := blockMsg(t, say("PIN@global: always run the tests")); !strings.Contains(msg, "for every repo") {
+		t.Errorf("PIN@global outside git: %q", msg)
+	}
+	if msg := blockMsg(t, say("UNPIN: staging")); !strings.Contains(msg, "unpinned") {
 		t.Errorf("UNPIN outside git: %q", msg)
 	}
-	// With more lines, the rest is for the agent: say so, don't block.
-	if msg := sysMsg(t, say("PIN: x\nnow explain cart.py")); !strings.Contains(msg, "nothing saved") {
-		t.Errorf("PIN plus a question outside git: %q", msg)
+	// The help must not offer the two verbs that cannot work here.
+	help := blockMsg(t, say("LEDGER?"))
+	if strings.Contains(help, "PIN@branch:") || strings.Contains(help, "PROMOTE:") {
+		t.Errorf("folder help offers verbs that need a repo: %q", help)
 	}
-	if out := say("PINS?"); !strings.Contains(out, `"decision":"block"`) || !strings.Contains(out, "git repository") {
-		t.Errorf("PINS? outside git: %q", out)
+	if !strings.Contains(help, "every chat in this folder") {
+		t.Errorf("folder help does not explain PIN@repo: %q", help)
 	}
-	if out := say("hello"); out != "" {
-		t.Errorf("plain prompt outside git: %q", out)
+	// PROMOTE: writes into a work tree, so it is the one verb with nowhere to go.
+	if msg := blockMsg(t, say("PROMOTE: ask before pushing")); !strings.Contains(msg, "git repository") {
+		t.Errorf("PROMOTE outside git: %q", msg)
+	}
+}
+
+// Two folders are two ledgers, and a folder is never confused with a repo that
+// happens to share its name.
+func TestFolderLedgersStayApart(t *testing.T) {
+	e := setup(t)
+	a, b := t.TempDir(), t.TempDir()
+	rootA, errA := ledger.Root(a)
+	rootB, errB := ledger.Root(b)
+	if errA != nil || errB != nil || rootA == rootB {
+		t.Fatalf("two folders share a ledger: %q %q (%v %v)", rootA, rootB, errA, errB)
+	}
+	if !ledger.IsFolder(rootA) || ledger.IsFolder(e.root) {
+		t.Fatalf("folder and repo ledgers are not told apart: %q %q", rootA, e.root)
+	}
+	if again, _ := ledger.Root(a); again != rootA {
+		t.Fatalf("folder ledger is not stable: %q vs %q", rootA, again)
 	}
 }
 
