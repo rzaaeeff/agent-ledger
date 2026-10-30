@@ -140,7 +140,7 @@ func TakeCleared(root, sid, cwd string, isNew bool) (pick *Note, ambiguous bool)
 		if from == "" && isNew {
 			seen := map[string]bool{}
 			for _, n := range notes {
-				if n.Cwd == cwd && n.Epoch > now-600 {
+				if n.Cwd != "" && canonDir(n.Cwd) == canonDir(cwd) && n.Epoch > now-600 {
 					seen[n.Session] = true
 					from = n.Session
 				}
@@ -237,4 +237,16 @@ func PruneCandidates(cwd, root, keep string, days int) []string {
 		}
 	}
 	return out
+}
+
+// canonDir is cwd made absolute, cleaned and with symlinks resolved, so "$R/",
+// "$R" and a symlink to $R count as one folder for the /clear handoff.
+func canonDir(cwd string) string {
+	if a, err := filepath.Abs(cwd); err == nil {
+		cwd = a
+	}
+	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = r
+	}
+	return filepath.Clean(cwd)
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -35,6 +36,7 @@ type HookInput struct {
 	SessionID string
 	Source    string
 	Reason    string
+	bad       bool // not a JSON object, or a session_id that is not a string or number
 }
 
 // ReadHookInput parses the hook JSON. Invalid input yields an empty HookInput.
@@ -42,10 +44,18 @@ func ReadHookInput(r io.Reader) HookInput {
 	var h HookInput
 	data, _ := io.ReadAll(r)
 	if json.Unmarshal(data, &h.raw) != nil || h.raw == nil {
-		h.raw = map[string]any{}
+		h.raw, h.bad = map[string]any{}, true
 	}
 	str := func(k string) string { s, _ := h.raw[k].(string); return s }
 	h.Prompt, h.Cwd, h.SessionID, h.Source, h.Reason = str("prompt"), str("cwd"), str("session_id"), str("source"), str("reason")
+	switch v := h.raw["session_id"].(type) {
+	case float64:
+		h.SessionID = strconv.FormatFloat(v, 'f', -1, 64)
+	case string, nil:
+	default:
+		// Never fall back to the shared branch ledger for an id we can't read.
+		h.bad = true
+	}
 	if h.Cwd == "" {
 		h.Cwd, _ = os.Getwd()
 	}
@@ -102,15 +112,17 @@ func debug(root, event string, h HookInput) {
 // Plain stdout would reach the model, so it prints only a systemMessage JSON (shown
 // to the user) after PIN:/UNPIN:. Problems go to errors.log.
 func HookUserPromptSubmit(h HookInput, out io.Writer) {
-	if h.Prompt == "" {
+	if h.Prompt == "" || h.bad {
 		return
 	}
 	cfg := LoadConfig(h.Cwd)
 	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
 	if err != nil {
 		why := "agent-ledger could not open its ledger: " + err.Error()
-		if errors.Is(err, ErrNoRepo) {
+		if err == ErrNoRepo {
 			why = "agent-ledger works only inside a git repository; this folder is not in one, so nothing is stored here."
+		} else if errors.Is(err, ErrNoRepo) {
+			why = "git could not open this folder as a repository, so nothing is stored here. " + strings.TrimPrefix(err.Error(), ErrNoRepo.Error()+"; ")
 		}
 		if q := strings.TrimSpace(h.Prompt); strings.EqualFold(q, "PINS?") || strings.EqualFold(q, "LEDGER?") {
 			block(out, why)
@@ -237,6 +249,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			id = pinID(LifeCarry, cmd.text)
 		}
 		file := filepath.Join(target, PinnedFile)
+		id = uniqueID(file, id, cmd.text)
 		all := listPins(h.Cwd, dir, here)
 		var similar []located
 		for _, p := range all {
@@ -389,7 +402,7 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
 	if hit.Life == LifeCarry {
 		scope = LifeCarry
 	}
-	p := Pin{pinID(scope, cmd.text), Now().Format(time.RFC3339Nano), cmd.text, hit.Life}
+	p := Pin{uniqueID(hit.File, pinID(scope, cmd.text), cmd.text), Now().Format(time.RFC3339Nano), cmd.text, hit.Life}
 	switch ok, err := replacePin(hit.File, hit.Pin, p); {
 	case err != nil:
 		LogError(dir, "reword failed")
@@ -440,6 +453,9 @@ func (s *suffixWriter) Write(b []byte) (int, error) {
 // example from Codex, keyed by branch) wants. With a session id it also exports
 // CLAUDE_SESSION_ID through $CLAUDE_ENV_FILE, for decide and status.
 func HookSessionStart(h HookInput, out io.Writer) {
+	if h.bad {
+		return
+	}
 	if h.SessionID != "" {
 		if f := os.Getenv("CLAUDE_ENV_FILE"); f != "" {
 			_ = appendRaw(f, []byte("export CLAUDE_SESSION_ID="+SessionKey(h.SessionID)+"\n"))

@@ -173,6 +173,18 @@ func pinID(scope, text string) string {
 	return hex.EncodeToString(sum[:])[:6]
 }
 
+// uniqueID is id, or id plus 6 more hex digits (from id and text) when
+// another text in file already has id: 6 hex digits collide now and then.
+func uniqueID(file, id, text string) string {
+	for _, p := range ReadJSONL[Pin](file) {
+		if p.ID == id && normText(p.Text) != normText(text) {
+			sum := sha1.Sum([]byte(id + "\x00" + text))
+			return id + hex.EncodeToString(sum[:])[:6]
+		}
+	}
+	return id
+}
+
 // pinLines formats pins for the injected context; tag marks lifetimes.
 func pinLines(pins []Pin, tag bool) []string {
 	var out []string

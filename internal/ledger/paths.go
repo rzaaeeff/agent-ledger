@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,6 +66,13 @@ func Root(cwd string) (string, error) {
 	}
 	common, err := git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil || common == "" {
+		// Keep git's reason (e.g. "detected dubious ownership"): it is not always "no repo".
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if line, _, _ := strings.Cut(strings.TrimSpace(string(ee.Stderr)), "\n"); line != "" && !strings.Contains(line, "not a git repository") {
+				return "", fmt.Errorf("%w; git said: %s", ErrNoRepo, line)
+			}
+		}
 		return "", ErrNoRepo
 	}
 	common = filepath.Clean(common)

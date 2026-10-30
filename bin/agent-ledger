@@ -10,7 +10,7 @@ repo="rzaaeeff/agent-ledger"
 
 fail() {
   if [ "${1-}" = hook ]; then
-    state="${XDG_STATE_HOME:-$HOME/.local/state}/agent-ledger"
+    state="${XDG_STATE_HOME:-${HOME:-}/.local/state}/agent-ledger"
     mkdir -p "$state" 2>/dev/null && chmod 700 "$state" 2>/dev/null
     printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$msg" >>"$state/skips.log" 2>/dev/null
     exit 0
@@ -37,7 +37,8 @@ esac
 ext=""; [ "$os" = windows ] && ext=".exe"
 name="agent-ledger-$os-$arch$ext"
 version="$(cat "$root/VERSION" 2>/dev/null)"
-data="${XDG_DATA_HOME:-$HOME/.local/share}/agent-ledger/v$version"
+if [ ! -x "$here/$name" ] && [ -z "${XDG_DATA_HOME:-}${HOME:-}" ]; then msg="HOME is not set"; fail "$@"; fi
+data="${XDG_DATA_HOME:-${HOME:-}/.local/share}/agent-ledger/v$version"
 bin="$here/$name"
 [ -x "$bin" ] || bin="$data/$name"
 

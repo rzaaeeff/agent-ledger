@@ -1052,6 +1052,11 @@ func TestPinScopeReviewFixes(t *testing.T) {
 func TestRedact(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"key AKIAABCDEFGHIJKLMNOP here", "key [REDACTED:aws-key] here"},
+		{"HTTPS://admin:Sup3rSecret@example.com/x", "HTTPS://admin:[REDACTED:url-password]@example.com/x"},
+		{`password: "super secret value" ok`, `password: "[REDACTED:secret]" ok`},
+		{"aws_secret_access_key=abcdEFGH1234", "aws_secret_access_key=[REDACTED:secret]"},
+		{"use sk_live_" + strings.Repeat("a", 24), "use [REDACTED:stripe-key]"},
+		{"post to https://hooks.slack.com/services/T000/B000/XXXX now", "post to [REDACTED:slack-webhook] now"},
 		{"use ghp_" + strings.Repeat("a", 36), "use [REDACTED:github-token]"},
 		{"sk-ant-" + strings.Repeat("x", 30) + " ok", "[REDACTED:api-key] ok"},
 		{"password=hunter22 and more", "password=[REDACTED:secret] and more"},
@@ -1602,5 +1607,68 @@ func TestOutsideGitRepo(t *testing.T) {
 	}
 	if out := say("hello"); out != "" {
 		t.Errorf("plain prompt outside git: %q", out)
+	}
+}
+
+func TestOddHookInput(t *testing.T) {
+	e := setup(t)
+	e.say("PIN: branch-ledger rule", "")
+	for _, in := range []string{"{", "not json", `{"cwd":"` + e.repo + `","session_id":{},"source":"compact"}`} {
+		if out, _, _ := cli(in, "hook", "session-start"); out != "" {
+			t.Errorf("session-start with %q printed %q", in, out)
+		}
+	}
+	for _, id := range []float64{1, 2} {
+		cli(map[string]any{"prompt": fmt.Sprintf("PIN: rule of %v", id), "cwd": e.repo, "session_id": id}, "hook", "user-prompt-submit")
+	}
+	out, _, _ := cli(map[string]any{"cwd": e.repo, "session_id": 1, "source": "compact"}, "hook", "session-start")
+	if !strings.Contains(out, "rule of 1") || strings.Contains(out, "rule of 2") || strings.Contains(out, "branch-ledger rule") {
+		t.Errorf("numeric session ids must be separate ledgers: %s", out)
+	}
+}
+
+func TestClearHandoffCanonicalCwd(t *testing.T) {
+	e := setup(t)
+	e.say("PIN!: survive the clear", "old")
+	cli(m{"cwd": e.repo + "/", "reason": "clear", "session_id": "old"}, "hook", "session-end")
+	cli(e.start("clear", "new"), "hook", "session-start")
+	if !strings.Contains(e.inject("compact", "new"), "survive the clear") {
+		t.Error("a trailing slash in cwd must not break the /clear handoff")
+	}
+}
+
+func TestGitRefusesRepo(t *testing.T) {
+	setup(t)
+	bare := filepath.Join(t.TempDir(), "b.git")
+	if err := exec.Command("git", "init", "-q", "--bare", bare).Run(); err != nil {
+		t.Skip("git unavailable")
+	}
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+	out, _, _ := cli(m{"prompt": "PIN: x", "cwd": bare, "session_id": "s1"}, "hook", "user-prompt-submit")
+	if msg := sysMsg(t, out); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git said") {
+		t.Errorf("git refusal: %q", msg)
+	}
+}
+
+func TestPinIDCollision(t *testing.T) {
+	e := setup(t)
+	f := filepath.Join(e.dir("s1"), "pinned.jsonl")
+	// "rule 3275" and "rule 3366" share the 6-digit sha1 prefix.
+	e.say("PIN: rule 3275", "s1")
+	e.say("PIN: rule 3366", "s1")
+	var ids []string
+	for _, l := range lines(t, f) {
+		var p struct{ ID string }
+		json.Unmarshal([]byte(l), &p)
+		ids = append(ids, p.ID)
+	}
+	if len(ids) != 2 || ids[0] == ids[1] {
+		t.Fatalf("colliding pins need distinct ids: %v", ids)
+	}
+	e.say("UNPIN: "+ids[0], "s1")
+	if got := pinTexts(t, f); len(got) != 1 || got[0] != "rule 3366|" {
+		t.Errorf("UNPIN by id removed the wrong pins: %v", got)
 	}
 }
