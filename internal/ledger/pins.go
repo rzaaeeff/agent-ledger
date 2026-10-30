@@ -116,7 +116,7 @@ type pinCmd struct {
 	scope string // "" (session) | branch | repo | global, or an unknown word
 	ref   string // PIN [ref]: rewords the pin ref selects
 	text  string
-	typed string // the prefix as typed, e.g. "pin:"
+	typed string // the verb as typed, e.g. "pin" (the scope may be lower case anyway)
 }
 
 // The ! may come before or after the scope, and a full-width colon counts too.
@@ -158,7 +158,7 @@ func parsePin(prompt string) (pinCmd, bool) {
 		text = text[:i]
 	}
 	return pinCmd{verb: strings.ToUpper(m[1]), keep: m[2] != "" || m[4] != "", scope: strings.ToLower(m[3]), ref: strings.TrimSpace(m[5]),
-		text: strings.TrimSpace(text), typed: m[0]}, true
+		text: strings.TrimSpace(text), typed: m[1]}, true
 }
 
 // pinID is sha1(text)[:6] for session pins (as before scopes existed) and

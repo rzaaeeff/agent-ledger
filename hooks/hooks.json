@@ -18,7 +18,7 @@
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agent-ledger\" hook session-end", "timeout": 10 }
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agent-ledger\" hook session-end", "timeout": 3 }
         ]
       }
     ]

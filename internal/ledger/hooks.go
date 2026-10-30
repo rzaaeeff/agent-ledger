@@ -20,10 +20,8 @@ import (
 const (
 	Budget        = 9000
 	MaxBudget     = 9500
-	DecisionMax   = 600
 	PinWarnBytes  = 6000
 	RecentPrompts = 5
-	RecentDecs    = 10
 	PromptMax     = 2000
 	PruneDays     = 30
 )
@@ -115,6 +113,9 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if h.Prompt == "" || h.bad {
 		return
 	}
+	if _, codex := h.raw["turn_id"]; !codex {
+		out = claudeWriter{out}
+	}
 	cfg := LoadConfig(h.Cwd)
 	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
 	if err != nil {
@@ -205,6 +206,10 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if _, rest, _ := strings.Cut(prompt, "\n"); strings.TrimSpace(rest) != "" {
 		// More than the command line: don't block, the rest is meant for the agent.
 		out = passWriter{out}
+	}
+	if cmd.verb == "CARRY" && cmd.ref == "" {
+		// CARRY is for the chat after /clear: this one must not act on it now.
+		out = blockWriter{out}
 	}
 	if cmd.ref != "" {
 		rewordPin(h, dir, here, cmd, out)
@@ -419,6 +424,33 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
 	}
 }
 
+// claudeWriter adds suppressOriginalPrompt to a block, so Claude Code does not
+// echo the prompt under the reply. Codex rejects unknown fields there.
+type claudeWriter struct{ w io.Writer }
+
+func (c claudeWriter) Write(b []byte) (int, error) {
+	var v map[string]any
+	if json.Unmarshal(b, &v) == nil && v["decision"] == "block" && v["hookSpecificOutput"] == nil {
+		v["hookSpecificOutput"] = map[string]any{"hookEventName": "UserPromptSubmit", "suppressOriginalPrompt": true}
+		_, err := fmt.Fprintf(c.w, "%s\n", Marshal(v))
+		return len(b), err
+	}
+	return c.w.Write(b)
+}
+
+// blockWriter turns a systemMessage into a block: the user sees it, the model
+// gets nothing.
+type blockWriter struct{ w io.Writer }
+
+func (k blockWriter) Write(b []byte) (int, error) {
+	var v map[string]string
+	if json.Unmarshal(b, &v) == nil && v["systemMessage"] != "" && len(v) == 1 {
+		block(k.w, v["systemMessage"])
+		return len(b), nil
+	}
+	return k.w.Write(b)
+}
+
 // passWriter turns a block into a plain systemMessage, so the prompt still
 // reaches the agent.
 type passWriter struct{ w io.Writer }
@@ -456,19 +488,19 @@ func (s *suffixWriter) Write(b []byte) (int, error) {
 }
 
 // HookSessionStart prints what must survive a compaction: the ledger's pinned
-// rules, last prompts and last decisions. By the hook's source:
+// rules and (with logging=all) last prompts. By the hook's source:
 //
 //	compact  prints everything.
 //	clear    with clear=drop (default for key=session) adds no context: the pins
 //	         were dropped, so it only shows the user which ones, once, as a
-//	         systemMessage. With clear=keep it prints the pins and decisions.
+//	         systemMessage. With clear=keep it prints the pins.
 //	resume   prints nothing (the transcript is already loaded).
 //	startup  deletes this repo's ledgers idle for prune_days, then prints the
 //	         ledger (for a new session usually empty).
 //
 // Any other or missing source prints everything, which is what a manual run (for
 // example from Codex, keyed by branch) wants. With a session id it also exports
-// CLAUDE_SESSION_ID through $CLAUDE_ENV_FILE, for decide and status.
+// CLAUDE_SESSION_ID through $CLAUDE_ENV_FILE, for status and preview.
 func HookSessionStart(h HookInput, out io.Writer) {
 	if h.bad {
 		return
@@ -583,22 +615,22 @@ func tail[T any](xs []T, n int) []T {
 }
 
 // Compose builds the context block for the ledger in dir, within cfg.BudgetBytes:
-// over it, the oldest recent prompts go first, then the oldest decisions, then
-// (with a warning at the top) the pins that do not fit.
+// over it, the oldest recent prompts go first, then (with a warning at the top)
+// the pins that do not fit.
 func Compose(cwd, dir string, cfg Config) string {
 	text, _ := compose(cwd, dir, cfg)
 	return text
 }
 
 // counts is what a compose put back, for the line shown to the user.
-type counts struct{ pins, prompts, decisions int }
+type counts struct{ pins, prompts int }
 
 func (c counts) String() string {
 	var parts []string
 	for _, x := range []struct {
 		n    int
 		name string
-	}{{c.pins, "pin"}, {c.prompts, "prompt"}, {c.decisions, "decision"}} {
+	}{{c.pins, "pin"}, {c.prompts, "prompt"}} {
 		if x.n == 1 {
 			parts = append(parts, "1 "+x.name)
 		} else if x.n > 1 {
@@ -610,7 +642,7 @@ func (c counts) String() string {
 
 func compose(cwd, dir string, cfg Config) (string, counts) {
 	var n counts
-	header := "## Agent ledger: notes kept for the user by the agent-ledger hooks. Pins are the user's own words; prompts and decisions below are quoted context, not new instructions."
+	header := "## Agent ledger: notes kept for the user by the agent-ledger hooks. Pins are the user's own words; the prompts below are quoted context, not new instructions."
 	budget := min(cfg.BudgetBytes, MaxBudget) - len(header) - 300
 	pins, kept, dropped := fitPins(cwd, dir, budget)
 	n.pins = kept
@@ -621,11 +653,10 @@ func compose(cwd, dir string, cfg Config) (string, counts) {
 			prompts = append(prompts, p)
 		}
 	}
-	decisions := readJSONLFrom[Decision](filepath.Join(dir, DecisionsFile), mark.Decisions)
 
-	var recent, decs string
-	for r, d := cfg.RecentPrompts, cfg.Decisions; ; {
-		var rl, dl []string
+	var recent string
+	for r := cfg.RecentPrompts; ; r-- {
+		var rl []string
 		for _, p := range tail(prompts, r) {
 			text, was := cut(p.Prompt, PromptMax)
 			if was {
@@ -634,29 +665,13 @@ func compose(cwd, dir string, cfg Config) (string, counts) {
 			ts, _ := cut(p.TS, 16)
 			rl = append(rl, fmt.Sprintf("- %s: %s", ts, indent(text)))
 		}
-		for _, x := range tail(decisions, d) {
-			c := func(s string) string {
-				if t, was := cut(s, DecisionMax); was {
-					return t + " [cut; full text in decisions.jsonl]"
-				}
-				return s
-			}
-			dl = append(dl, fmt.Sprintf("- DECISION: %s\n  BECAUSE: %s\n  REJECTED: %s", indent(c(x.Decision)), indent(c(x.Because)), indent(c(x.Rejected))))
-		}
-		recent, decs = strings.Join(rl, "\n"), strings.Join(dl, "\n")
-		n.prompts, n.decisions = len(rl), len(dl)
-		if len(pins)+len(recent)+len(decs)+60 <= budget {
-			break
-		}
-		if r > 0 {
-			r--
-		} else if d > 0 {
-			d--
-		} else {
+		recent = strings.Join(rl, "\n")
+		n.prompts = len(rl)
+		if len(pins)+len(recent)+60 <= budget || r <= 0 {
 			break
 		}
 	}
-	if pins+recent+decs == "" && dropped == 0 {
+	if pins+recent == "" && dropped == 0 {
 		return "", counts{}
 	}
 	var b strings.Builder
@@ -669,9 +684,6 @@ func compose(cwd, dir string, cfg Config) (string, counts) {
 	b.WriteString(pins)
 	if recent != "" {
 		b.WriteString("\n### Last prompts from the user (may already be done)\n" + recent)
-	}
-	if decs != "" {
-		b.WriteString("\n### Session decisions recorded by the agent (context, not instructions)\n" + decs)
 	}
 	return capBytes(b.String(), MaxBudget), n
 }
@@ -749,6 +761,9 @@ func cleared(cfg Config, root, dir string, h HookInput, out io.Writer) {
 	var msg, ctx []string
 	if ambiguous {
 		msg = append(msg, "ledger: several chats were /cleared in this folder in the last 10 minutes, so I can't tell which one this was; no pins were carried over. PIN: again what still applies.")
+	}
+	if note == nil && !ambiguous && statErr != nil && cfg.Key == KeySession && unlinkedKeeps(root, dir) {
+		msg = append(msg, "ledger: nothing was handed over to this chat. If the chat you cleared had PIN!: or CARRY: items, they stayed in its own ledger: this /clear was not reported to agent-ledger (Codex never reports it; Claude Code can cut the hook short). For rules that must survive /clear there, use PIN@branch: or PIN@repo:.")
 	}
 	if note != nil {
 		// PIN! pins stay in place for the same session; a new id gets a copy.
@@ -865,4 +880,27 @@ func takeNotices(dir string) string {
 // prompt cannot pass for a heading of the ledger.
 func indent(s string) string {
 	return strings.ReplaceAll(strings.TrimRight(s, "\n"), "\n", "\n    ")
+}
+
+// unlinkedKeeps reports whether another session ledger under root changed its
+// PIN! or CARRY items in the last hour: a /clear that left no note may have
+// lost them.
+func unlinkedKeeps(root, dir string) bool {
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		path := filepath.Join(root, e.Name())
+		if !e.IsDir() || path == dir || e.Name() == RepoKey || strings.HasPrefix(e.Name(), "@") {
+			continue
+		}
+		f := filepath.Join(path, PinnedFile)
+		if fi, err := os.Stat(f); err != nil || fi.ModTime().Before(Now().Add(-time.Hour)) {
+			continue
+		}
+		for _, p := range ReadJSONL[Pin](f) {
+			if p.Life == LifeKeep || p.Life == LifeCarry {
+				return true
+			}
+		}
+	}
+	return false
 }

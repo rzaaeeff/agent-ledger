@@ -27,20 +27,19 @@ type Note struct {
 	Carry   []Pin  `json:"carry,omitempty"` // CARRY: injected once after /clear
 }
 
-// ClearMarkFile records where the prompt and decision logs stood at the last /clear
+// ClearMarkFile records where the prompt log stood at the last /clear
 // of a session that keeps its id, so a later compact re-injects only what came after.
 // Line offsets, not timestamps: stamps have one-second granularity.
 const ClearMarkFile = "clear_mark.json"
 
 type clearMark struct {
-	Prompts   int `json:"prompts"`
-	Decisions int `json:"decisions"`
+	Prompts int `json:"prompts"`
 }
 
 // markCleared records the current log lengths of an existing session dir.
 func markCleared(dir string) {
 	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-		m := clearMark{len(readLines(filepath.Join(dir, PromptsFile))), len(readLines(filepath.Join(dir, DecisionsFile)))}
+		m := clearMark{len(readLines(filepath.Join(dir, PromptsFile)))}
 		_ = writeReplace(filepath.Join(dir, ClearMarkFile), append(Marshal(m), '\n'))
 	}
 }

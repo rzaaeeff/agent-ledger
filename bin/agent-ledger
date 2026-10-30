@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Picks the prebuilt binary for this OS/arch, downloading it from the release once if missing.
-# The download goes to ${XDG_DATA_HOME:-~/.local/share}/agent-ledger/v<version>/, not into
-# the plugin folder, whose contents Codex fingerprints for hook approval.
+# The download goes to the plugin's data folder ($CLAUDE_PLUGIN_DATA or $PLUGIN_DATA, which
+# uninstalling removes), else ${XDG_DATA_HOME:-~/.local/share}/agent-ledger, under v<version>/;
+# not into the plugin folder, whose contents Codex fingerprints for hook approval.
 # Hook calls never fail the session: on any problem they log to skips.log and exit 0.
 set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,10 +38,20 @@ esac
 ext=""; [ "$os" = windows ] && ext=".exe"
 name="agent-ledger-$os-$arch$ext"
 version="$(cat "$root/VERSION" 2>/dev/null)"
-if [ ! -x "$here/$name" ] && [ -z "${XDG_DATA_HOME:-}${HOME:-}" ]; then msg="HOME is not set"; fail "$@"; fi
-data="${XDG_DATA_HOME:-${HOME:-}/.local/share}/agent-ledger/v$version"
 bin="$here/$name"
-[ -x "$bin" ] || bin="$data/$name"
+if [ ! -x "$bin" ]; then
+  # The first folder that has the binary, else the first one that is set.
+  data="" xdg=""
+  if [ -n "${XDG_DATA_HOME:-}" ]; then xdg="$XDG_DATA_HOME/agent-ledger"
+  elif [ -n "${HOME:-}" ]; then xdg="$HOME/.local/share/agent-ledger"; fi
+  for d in "${CLAUDE_PLUGIN_DATA:-}" "${PLUGIN_DATA:-}" "$xdg"; do
+    [ -n "$d" ] || continue
+    [ -n "$data" ] || data="$d/v$version"
+    if [ -x "$d/v$version/$name" ]; then data="$d/v$version"; break; fi
+  done
+  if [ -z "$data" ]; then msg="HOME is not set"; fail "$@"; fi
+  bin="$data/$name"
+fi
 
 download() {
   base="https://github.com/$repo/releases/download/v$version"
@@ -72,10 +83,21 @@ if [ ! -x "$bin" ]; then
     err=/dev/null
     mkdir -p "$data" 2>/dev/null
     lock="$data/.download.lock"
+    failed="$data/.download.failed"
     if [ -n "$(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; fi
+    # After a failed download, wait an hour before trying again.
+    if [ -n "$(find "$failed" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then rm -f "$failed"; fi
+    if [ -f "$failed" ]; then
+      msg="$name v$version missing; last download failed, retrying after an hour"
+      case "${2-}" in
+        user-prompt-submit | session-start) printf '%s\n' '{"systemMessage":"agent-ledger is not working: downloading its binary failed (see ~/.local/state/agent-ledger/skips.log). Nothing is recorded; it retries within an hour."}' ;;
+      esac
+      fail hook
+    fi
     if mkdir "$lock" 2>/dev/null; then
       (
         ok=0; download || ok=1
+        [ $ok -eq 0 ] || : >"$failed"
         rmdir "$lock" 2>/dev/null
         [ $ok -eq 0 ] || fail hook
       ) </dev/null >/dev/null 2>&1 &

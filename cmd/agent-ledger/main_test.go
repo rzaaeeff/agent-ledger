@@ -30,7 +30,7 @@ func setup(t *testing.T) *env {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(state, "config"))
 	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_ENV_FILE", "AGENT_LEDGER_DEBUG",
 		"AGENT_LEDGER_KEY", "AGENT_LEDGER_CLEAR", "AGENT_LEDGER_PRUNE_DAYS", "AGENT_LEDGER_RECENT_PROMPTS",
-		"AGENT_LEDGER_DECISIONS", "AGENT_LEDGER_BUDGET_BYTES", "AGENT_LEDGER_REDACT", "AGENT_LEDGER_PROMOTE_TO"} {
+		"AGENT_LEDGER_BUDGET_BYTES", "AGENT_LEDGER_REDACT", "AGENT_LEDGER_PROMOTE_TO"} {
 		t.Setenv(k, "")
 	}
 	// Most tests cover prompt logging; the default (pins-only) has its own test.
@@ -145,6 +145,9 @@ func sysMsg(t *testing.T, out string) string {
 	if err := json.Unmarshal([]byte(out), &v); err != nil {
 		t.Fatalf("want one JSON object, got %q", out)
 	}
+	if h, _ := v["hookSpecificOutput"].(map[string]any); v["decision"] == "block" && h["suppressOriginalPrompt"] == true {
+		delete(v, "hookSpecificOutput")
+	}
 	if v["decision"] == "block" && len(v) == 2 {
 		if r, _ := v["reason"].(string); r != "" {
 			return r
@@ -203,7 +206,7 @@ func TestLoggingAndPins(t *testing.T) {
 		t.Errorf("PIN message = %q", msg)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "s1")
-	if out, _, _ := cli(nil, "status"); out != "ledger: 1 pins (~5 tokens) | 3 prompts | 0 decisions | 0 errors\n" {
+	if out, _, _ := cli(nil, "status"); out != "ledger: 1 pins (~5 tokens) | 3 prompts | 0 errors\n" {
 		t.Errorf("status = %q", out)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
@@ -252,14 +255,14 @@ func TestKeyedBySession(t *testing.T) {
 		t.Errorf("other session must see only its own pins:\n%s", out)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "s2")
-	want := "ledger: 1 pins (~3 tokens) | 1 prompts | 0 decisions | 0 errors\n"
+	want := "ledger: 1 pins (~3 tokens) | 1 prompts | 0 errors\n"
 	if out, _, _ := cli(nil, "status"); out != want {
 		t.Errorf("CLAUDE_CODE_SESSION_ID=s2 status = %q", out)
 	}
-	t.Setenv("CLAUDE_CODE_SESSION_ID", "s1")
-	t.Setenv("CLAUDE_SESSION_ID", "s2")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "s2")
+	t.Setenv("CLAUDE_SESSION_ID", "s1")
 	if out, _, _ := cli(nil, "status"); out != want {
-		t.Errorf("CLAUDE_SESSION_ID must win over a stale CLAUDE_CODE_SESSION_ID: %q", out)
+		t.Errorf("CLAUDE_CODE_SESSION_ID (Claude Code's own) must win over CLAUDE_SESSION_ID from CLAUDE_ENV_FILE: %q", out)
 	}
 	t.Setenv("CLAUDE_SESSION_ID", "")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
@@ -301,12 +304,13 @@ func TestKeyedBySession(t *testing.T) {
 	if len(ls) == 0 || ls[len(ls)-1] != "export CLAUDE_SESSION_ID="+ledger.SessionKey("a b;$(x)") {
 		t.Fatalf("CLAUDE_ENV_FILE = %q", ls)
 	}
-	// decide with the exported id must land in the ledger the hooks use.
+	// status with the exported id must read the ledger the hooks use.
+	e.say("PIN: exported", "a b;$(x)")
 	t.Setenv("CLAUDE_SESSION_ID", strings.TrimPrefix(ls[len(ls)-1], "export CLAUDE_SESSION_ID="))
-	cli(nil, "decide", "exported", "b", "-")
+	st, _, _ := cli(nil, "status")
 	t.Setenv("CLAUDE_SESSION_ID", "")
-	if out := e.inject("compact", "a b;$(x)"); !strings.Contains(out, "DECISION: exported") {
-		t.Errorf("decide via the exported id is not seen by the hooks:\n%s", out)
+	if !strings.HasPrefix(st, "ledger: 1 pins") {
+		t.Errorf("status via the exported id does not see the hooks' ledger: %q", st)
 	}
 }
 
@@ -318,9 +322,9 @@ func TestBranchFallback(t *testing.T) {
 	if !exists(filepath.Join(d2, "prompts.jsonl")) {
 		t.Error("no session id: branch ledger not used / not sanitised")
 	}
-	out, errs, rc := cli(nil, "decide", "fb", "fb", "fb")
-	if rc != 0 || !strings.Contains(errs, "no session id") || !exists(filepath.Join(d2, "decisions.jsonl")) {
-		t.Errorf("decide fallback: rc=%d out=%q err=%q", rc, out, errs)
+	out, errs, rc := cli(nil, "status")
+	if rc != 0 || !strings.Contains(errs, "no session id") || !strings.Contains(out, "| 1 prompts") {
+		t.Errorf("status fallback: rc=%d out=%q err=%q", rc, out, errs)
 	}
 	e.checkout("--detach")
 	e.say("detached", "")
@@ -329,9 +333,6 @@ func TestBranchFallback(t *testing.T) {
 	}
 	e.checkout("main")
 	t.Chdir(t.TempDir())
-	if out, _, rc := cli(nil, "decide", "a", "b", "c"); rc != 1 || out != "" {
-		t.Errorf("decide outside a repo: rc=%d out=%q", rc, out)
-	}
 	if out, _, _ := cli(nil, "status"); out != "ledger: not in a git repository\n" {
 		t.Errorf("status outside a repo = %q", out)
 	}
@@ -374,25 +375,19 @@ func TestConcurrency(t *testing.T) {
 	}
 }
 
-func TestDecideAndInject(t *testing.T) {
+func TestInject(t *testing.T) {
 	e := setup(t)
 	e.say("hello", "s1")
 	e.say("PIN: never commit to main", "s1")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "s1")
-	if out, errs, rc := cli(nil, "decide", "use X", "because Y", "Z rejected"); rc != 0 || errs != "" || !strings.HasPrefix(out, "decide: recorded in") {
-		t.Errorf("decide: rc=%d out=%q err=%q", rc, out, errs)
-	}
-	if _, _, rc := cli(nil, "decide", "a"); rc != 2 {
-		t.Errorf("decide with wrong arg count: rc=%d, want 2", rc)
-	}
-	if got := lastField(t, filepath.Join(e.dir("s1"), "decisions.jsonl"), "because"); got != "because Y" {
-		t.Errorf("decision = %q", got)
+	if _, _, rc := cli(nil, "decide", "a", "b", "c"); rc != 2 {
+		t.Errorf("decide is gone: rc=%d, want 2 (usage)", rc)
 	}
 	for i := 0; i < 8; i++ {
 		e.say(fmt.Sprintf("recent %d", i), "s1")
 	}
 	out := e.inject("compact", "s1")
-	for _, want := range []string{"Pinned by the user", "never commit to main", "Last prompts", "DECISION: use X", "Session decisions"} {
+	for _, want := range []string{"Pinned by the user", "never commit to main", "Last prompts"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("compact output lacks %q:\n%s", want, out)
 		}
@@ -672,12 +667,12 @@ func TestConfigLayers(t *testing.T) {
 
 	t.Setenv("AGENT_LEDGER_LOGGING", "")
 	c := ledger.LoadConfig(e.repo)
-	if c.Logging != "pins-only" || c.Key != "session" || c.Clear != "drop" || c.PruneDays != 30 || c.RecentPrompts != 5 || c.Decisions != 10 || c.BudgetBytes != 9000 || len(c.Problems) != 0 {
+	if c.Logging != "pins-only" || c.Key != "session" || c.Clear != "drop" || c.PruneDays != 30 || c.RecentPrompts != 5 || c.BudgetBytes != 9000 || len(c.Problems) != 0 {
 		t.Fatalf("defaults changed: %+v", c)
 	}
 
 	writeFile(t, userFile, `{"key":"branch","recent_prompts":3,"prune_days":7}`)
-	writeFile(t, repoFile, `{"recent_prompts":2,"bogus":1,"decisions":"x","budget_bytes":5}`)
+	writeFile(t, repoFile, `{"recent_prompts":2,"bogus":1,"prune_days":"x","budget_bytes":5}`)
 	t.Setenv("AGENT_LEDGER_PRUNE_DAYS", "0")
 	c = ledger.LoadConfig(e.repo)
 	if c.Key != "branch" || c.Source["key"] != userFile {
@@ -692,7 +687,7 @@ func TestConfigLayers(t *testing.T) {
 	if c.Clear != "keep" {
 		t.Errorf("clear must default to keep for a shared ledger, got %s", c.Clear)
 	}
-	if c.Decisions != 10 || c.BudgetBytes != 9000 || len(c.Problems) != 3 {
+	if c.BudgetBytes != 9000 || len(c.Problems) != 3 {
 		t.Errorf("bad values must be ignored and reported: %+v %q", c, c.Problems)
 	}
 	out, _, rc := cli(nil, "config")
@@ -1178,9 +1173,6 @@ func TestLaunchFixes(t *testing.T) {
 	os.WriteFile(blocked, []byte("x"), 0o600)
 	state := os.Getenv("XDG_STATE_HOME")
 	t.Setenv("XDG_STATE_HOME", blocked)
-	if out, _, rc := cli(nil, "decide", "a", "b", "c"); rc != 1 || strings.Contains(out, "recorded") {
-		t.Errorf("decide on an unwritable store: rc=%d out=%q", rc, out)
-	}
 	if msg := sysMsg(t, e.say("PIN: lost", "w1")); !strings.Contains(msg, "NOT SAVED") || strings.Contains(msg, "pinned [") {
 		t.Errorf("PIN on an unwritable store = %q", msg)
 	}
@@ -1216,15 +1208,15 @@ func TestLaunchFixes(t *testing.T) {
 	t.Setenv("AGENT_LEDGER_KEY", "")
 	e.checkout("main")
 
-	// The budget holds even for one huge decision.
+	// The budget holds even for one huge prompt.
 	t.Setenv("CLAUDE_SESSION_ID", "big")
-	cli(nil, "decide", strings.Repeat("d", 15000), "b", "-")
-	t.Setenv("AGENT_LEDGER_BUDGET_CHARS", "1000")
+	e.say(strings.Repeat("d", 15000), "big")
+	t.Setenv("AGENT_LEDGER_BUDGET_BYTES", "1000")
 	if out, _, _ := cli(nil, "inject"); len([]rune(out)) > 1500 {
 		t.Errorf("budget 1000 printed %d chars", len([]rune(out)))
 	}
-	t.Setenv("AGENT_LEDGER_BUDGET_CHARS", "")
-	if out, _, _ := cli(nil, "inject"); !strings.Contains(out, "[cut; full text in decisions.jsonl]") || len(out) > 9000+400 {
+	t.Setenv("AGENT_LEDGER_BUDGET_BYTES", "")
+	if out, _, _ := cli(nil, "inject"); !strings.Contains(out, "[cut; full text in prompts.jsonl]") || len(out) > 9000+400 {
 		t.Errorf("default budget: %d chars, cut marker missing", len(out))
 	}
 }
@@ -1272,9 +1264,9 @@ func TestForgivingPins(t *testing.T) {
 	// sees nothing, and it is not logged.
 	before := len(lines(t, filepath.Join(d, "prompts.jsonl")))
 	out := e.say("  PINS?  ", "s1")
-	var v map[string]string
-	if json.Unmarshal([]byte(out), &v) != nil || v["decision"] != "block" || !strings.Contains(v["reason"], "1. [") ||
-		!strings.Contains(v["reason"], "2. [") || !strings.Contains(v["reason"], "use pnpm") {
+	var v struct{ Decision, Reason string }
+	if json.Unmarshal([]byte(out), &v) != nil || v.Decision != "block" || !strings.Contains(v.Reason, "1. [") ||
+		!strings.Contains(v.Reason, "2. [") || !strings.Contains(v.Reason, "use pnpm") {
 		t.Errorf("PINS? output: %q", out)
 	}
 	if n := len(lines(t, filepath.Join(d, "prompts.jsonl"))); n != before {
@@ -1404,11 +1396,11 @@ func TestPinUX(t *testing.T) {
 	e := setup(t)
 	f := filepath.Join(e.dir("s1"), "pinned.jsonl")
 	block := func(out string) string {
-		var v map[string]string
-		if json.Unmarshal([]byte(out), &v) != nil || v["decision"] != "block" {
+		var v struct{ Decision, Reason string }
+		if json.Unmarshal([]byte(out), &v) != nil || v.Decision != "block" {
 			t.Errorf("want a block decision, got %q", out)
 		}
-		return v["reason"]
+		return v.Reason
 	}
 
 	// Any case, only at the start.
@@ -1709,5 +1701,57 @@ func TestCommandWithMoreLinesIsNotBlocked(t *testing.T) {
 	}
 	if out := e.say("UNPIN: freeze schema", "s1"); !strings.Contains(out, `"decision":"block"`) {
 		t.Errorf("a bare command is still blocked: %q", out)
+	}
+}
+
+func TestLiveReviewFixes(t *testing.T) {
+	e := setup(t)
+	f := filepath.Join(e.dir("s1"), "pinned.jsonl")
+
+	// CARRY is for the chat after /clear: the current one must not see it.
+	if out := e.say("CARRY: next task is the parser", "s1"); !strings.Contains(out, `"decision":"block"`) || !strings.Contains(sysMsg(t, out), "after the next /clear") {
+		t.Errorf("CARRY must block: %q", out)
+	}
+	// Claude Code: no "Original prompt:" echo; Codex: no unknown field.
+	if out := e.say("PINS?", "s1"); !strings.Contains(out, `"suppressOriginalPrompt":true`) {
+		t.Errorf("Claude Code block without suppressOriginalPrompt: %q", out)
+	}
+	codex := e.prompt("PINS?", "s1")
+	codex["turn_id"] = "t1"
+	if out, _, _ := cli(codex, "hook", "user-prompt-submit"); strings.Contains(out, "hookSpecificOutput") || !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("Codex block must stay in its schema: %q", out)
+	}
+
+	// An upper-case verb with a lower-case scope is not a slip.
+	if msg := sysMsg(t, e.say("PIN@repo: repo wide", "s1")); strings.Contains(msg, "Not meant as a pin") {
+		t.Errorf("PIN@repo: got the lower-case hint: %q", msg)
+	}
+
+	// A pin whose whole text is the ref is removed, even when it is short or
+	// other pins contain the same words.
+	e.say("PIN: x", "s1")
+	e.say("PIN: deploy", "s1")
+	e.say("PIN: deploy now", "s1")
+	e.say("UNPIN: x", "s1")
+	e.say("UNPIN: deploy", "s1")
+	got := strings.Join(pinTexts(t, f), ";")
+	if strings.Contains(got, "x|") || strings.Contains(got, "deploy|") || !strings.Contains(got, "deploy now|") {
+		t.Errorf("exact-text UNPIN: %v", got)
+	}
+}
+
+func TestUnreportedClear(t *testing.T) {
+	e := setup(t)
+	// Codex: no SessionEnd, a new thread id on /clear.
+	e.say("PIN!: keep me", "t1")
+	msg := sysMsg(t, e.inject("clear", "t2"))
+	if !strings.Contains(msg, "not reported") || !strings.Contains(msg, "PIN@branch") {
+		t.Errorf("an unreported /clear must say why nothing came over: %q", msg)
+	}
+	// Nothing to lose: stay quiet.
+	e2 := setup(t)
+	e2.say("PIN: plain", "u1")
+	if out := e2.inject("clear", "u2"); strings.Contains(out, "not reported") {
+		t.Errorf("no PIN!/CARRY anywhere, yet a warning: %q", out)
 	}
 }

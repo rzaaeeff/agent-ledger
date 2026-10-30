@@ -56,6 +56,9 @@ func pinMatches(p Pin, q string) bool {
 	if strings.EqualFold(p.ID, strings.Trim(q, "[]")) {
 		return true
 	}
+	if nq := normText(q); nq != "" && nq == normText(p.Text) {
+		return true
+	}
 	if len([]rune(strings.ReplaceAll(normText(q), " ", ""))) < 3 {
 		return false
 	}
@@ -169,8 +172,18 @@ func resolveRef(q string, pins []located) string {
 	return q
 }
 
-// matching is the pins q selects; one entry per store and id.
+// matching is the pins q selects; one entry per store and id. Pins whose whole
+// text is q win over pins that merely contain its words.
 func matching(q string, pins []located) []located {
+	var exact []located
+	for _, p := range pins {
+		if nq := normText(q); nq != "" && nq == normText(p.Text) {
+			exact = append(exact, p)
+		}
+	}
+	if len(exact) > 0 {
+		pins = exact
+	}
 	var out []located
 	seen := map[string]bool{}
 	for _, p := range pins {

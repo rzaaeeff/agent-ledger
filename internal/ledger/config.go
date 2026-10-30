@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-// Key modes: which ledger a prompt, pin or decision belongs to.
+// Key modes: which ledger a prompt or pin belongs to.
 const (
 	KeySession = "session" // one ledger per Claude Code session (default)
 	KeyBranch  = "branch"  // one per branch, shared by all sessions on it
@@ -34,7 +34,6 @@ type Config struct {
 	Clear         string `json:"clear"`          // drop | keep (default: drop for session, keep otherwise)
 	PruneDays     int    `json:"prune_days"`     // idle days before a ledger is deleted; 0 = never
 	RecentPrompts int    `json:"recent_prompts"` // prompts re-injected after compact
-	Decisions     int    `json:"decisions"`      // decisions re-injected after compact
 	BudgetBytes   int    `json:"budget_bytes"`   // injection budget in UTF-8 bytes, at most MaxBudget
 	Logging       string `json:"logging"`        // all | pins-only | off: which prompts are logged
 	Redact        string `json:"redact"`         // on | off: mask secrets before storing
@@ -62,7 +61,6 @@ func (c *Config) fields() []field {
 		{name: "clear", str: &c.Clear, allowed: []string{"drop", "keep"}},
 		{name: "prune_days", num: &c.PruneDays, minimum: 0, maxi: 36500},
 		{name: "recent_prompts", num: &c.RecentPrompts, minimum: 0, maxi: 100},
-		{name: "decisions", num: &c.Decisions, minimum: 0, maxi: 200},
 		{name: "budget_bytes", num: &c.BudgetBytes, minimum: 1000, maxi: MaxBudget},
 		{name: "logging", str: &c.Logging, allowed: []string{"all", "pins-only", "off"}},
 		{name: "redact", str: &c.Redact, allowed: []string{"on", "off"}},
@@ -73,7 +71,7 @@ func (c *Config) fields() []field {
 // DefaultConfig is today's behaviour.
 func DefaultConfig() Config {
 	c := Config{Key: KeySession, PruneDays: PruneDays, RecentPrompts: RecentPrompts,
-		Decisions: RecentDecs, BudgetBytes: Budget, Logging: "pins-only", Redact: "on", Source: map[string]string{}}
+		BudgetBytes: Budget, Logging: "pins-only", Redact: "on", Source: map[string]string{}}
 	for _, f := range c.fields() {
 		c.Source[f.name] = "default"
 	}

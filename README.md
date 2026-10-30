@@ -10,7 +10,7 @@ PIN: don't touch the migrations, the schema is frozen until Friday
 
 After `/compact`, the agent sees that pin again, word for word. You get a one-line note saying what was restored.
 
-**Status: v0.1, early.** The hooks are covered by tests that feed them the JSON Claude Code and Codex send. They have not yet been run in a live Claude Code or Codex session. Please report what breaks.
+**Status: v0.1, early.** Tests feed the hooks the JSON Claude Code and Codex send, and one live run (Claude Code 2.1.312, Codex 0.164.0) restored pins word for word after compaction in both. That is one run, not wide use: please report what breaks.
 
 ## Is it for you?
 
@@ -40,9 +40,9 @@ codex plugin marketplace add rzaaeeff/agent-ledger
 
 then install `agent-ledger` from `/plugins` and approve its hooks.
 
-On first use the plugin downloads one binary (about 3.5 MB) for your OS from the GitHub release into `~/.local/share/agent-ledger/`, and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). The download runs in the background; until it finishes you see "still installing" and prompts are not recorded. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere a `PIN:` tells you so).
+On first use the plugin downloads one binary (about 3.5 MB) for your OS from the GitHub release into the plugin's data folder (removed when you uninstall; `~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). The download runs in the background; until it finishes you see "still installing" and prompts are not recorded. If it fails, you are told on each prompt and it retries after an hour. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere a `PIN:` tells you so).
 
-Your normal prompts are never blocked. `PINS?`, `LEDGER?`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about removed or changed pins with your next prompt. If the download fails, the reason goes to `~/.local/state/agent-ledger/skips.log`. If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
+Your normal prompts are never blocked. `PINS?`, `LEDGER?`, `CARRY:`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about removed or changed pins with your next prompt. In Claude Code the command stays in the input box after the reply; clear it (Ctrl+U) before typing on. If the download fails, the reason goes to `~/.local/state/agent-ledger/skips.log`. If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 
 ## Using it
 
@@ -70,7 +70,7 @@ You don't have to remember a pin's exact wording:
 - If nothing or more than one pin matches, nothing is removed and you get the closest pins with their ids.
 - Pinning the same text again does nothing (`PIN!:` on a `PIN:` makes it survive `/clear`); if only case or punctuation differ, you're shown the stored wording so you can reword it. Pinning something close to an existing pin saves it and names the old one, so you can `UNPIN` it if the new one replaces it. The tool never decides that for you.
 
-Decisions (advanced): `agent-ledger decide "<decision>" "<because>" "<rejected>"` records one, and the last 10 come back after compaction, labelled as context the agent recorded, not as instructions. Nothing calls it for you: ask the agent to run it, or run it yourself.
+To keep a decision, pin it: `PIN: chose SQLite over Postgres, single user`.
 
 To check what is stored or what the next compaction would inject:
 
@@ -85,28 +85,28 @@ Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): C
 
 - By default only ledger commands are logged, not your other prompts. `"logging": "all"` also logs every prompt, and then your last 5 come back after compaction.
 - Before anything is stored, common secrets are masked: API keys, GitHub/Slack/AWS tokens, private keys, JWTs, Stripe keys, Slack webhook URLs, URL passwords, and `password=`-style values (also names like `db_password`, quoted or not). This is pattern matching. It will miss some secrets, and it can mask harmless text that looks like one.
-- Files stay on your machine, under `~/.local/state/agent-ledger/` and readable only by you. The tool itself makes no network calls apart from the one-time binary download; what it re-injects goes to your model provider like the rest of the chat. When a session starts, ledgers in that repo untouched for 30 days are deleted, including their `PIN!:` pins and decisions. `PIN@branch:` pins go once the branch is deleted and idle. Repo and global pins are kept until you `UNPIN` them.
+- Files stay on your machine, under `~/.local/state/agent-ledger/` and readable only by you. The tool itself makes no network calls apart from the one-time binary download; what it re-injects goes to your model provider like the rest of the chat. When a session starts, ledgers in that repo untouched for 30 days are deleted, including their `PIN!:` pins. `PIN@branch:` pins go once the branch is deleted and idle. Repo and global pins are kept until you `UNPIN` them.
 - A repo's `.agent-ledger.json` can only make `logging`, `redact`, `key` and `prune_days` stricter than your own settings, and its `promote_to` may only be `AGENTS.md` or `CLAUDE.md`. Anything else is ignored; the session-start note says so and `agent-ledger config` says why.
-- What comes back after compaction is framed for the agent as your notes: pins are your words; recent prompts and decisions are quoted context, not new instructions. That lowers the risk of old text being read as a fresh order; it does not remove it.
+- What comes back after compaction is framed for the agent as your notes: pins are your words; recent prompts are quoted context, not new instructions. That lowers the risk of old text being read as a fresh order; it does not remove it.
 
 ## Where it works
 
 | Tool | Status |
 |---|---|
-| Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Should work: they share the same hooks and plugins |
-| Codex: CLI and desktop app | Experimental, macOS/Linux. Not on Windows (Codex runs hooks with `cmd.exe`). Codex already keeps recent user messages word for word when it compacts, so the gain is smaller there: mostly old rules and `PIN@branch`/`@repo`/`@global` across `/new` |
+| Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Works in the CLI (tested live). The others share its hooks and plugins, but the VS Code panel does not show the one-line notes ([#80882](https://github.com/anthropics/claude-code/issues/80882)). On Windows, hooks need Git Bash |
+| Codex: CLI and desktop app | Experimental, macOS/Linux. Not on Windows yet (Codex runs hooks with `cmd.exe`; the plugin ships no Windows command). Codex already keeps recent user messages word for word when it compacts, so the gain is smaller there: mostly old rules and `PIN@branch`/`@repo`/`@global` across `/new` |
 | Codex IDE extension | Plugins aren't installed there; manual hook setup may work, untested |
 | Claude Code on the web, Codex cloud | No. The ledger is a local folder |
 
-Codex `/clear` opens a new thread with no link to the old one, so `PIN:`, `PIN!:` and `CARRY:` don't cross it. Use `PIN@branch:` or `PIN@repo:` there.
+Codex `/clear` opens a new thread with no link to the old one, so `PIN:`, `PIN!:` and `CARRY:` don't cross it; the new chat says so when that may have lost something. Use `PIN@branch:` or `PIN@repo:` there.
 
 ## How chats are told apart
 
 By default each chat has its own ledger, keyed by the session id Claude Code or Codex passes to the hooks. Switching branch or worktree mid-chat keeps the same ledger, and a second chat on the same branch never sees the first one's pins.
 
-After `/clear`, Claude Code may start a new session id. Your `PIN!:` pins and `CARRY:` items move to it only if exactly one chat in the same folder was cleared in the last 10 minutes. If several were, nothing moves and you are told. A forked chat starts its own ledger (it sees branch, repo and global pins, not the original chat's).
+After `/clear`, Claude Code starts a new session id. Your `PIN!:` pins and `CARRY:` items move to it only if exactly one chat in the same folder was cleared in the last 10 minutes. If several were, or the end-of-chat hook didn't run, nothing moves and you are told. A forked chat starts its own ledger (it sees branch, repo and global pins, not the original chat's).
 
-Without a hook session id (`decide`, `status`, `preview`), the ledger comes from `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID` or `CODEX_THREAD_ID`, else the current branch (`detached` on a detached HEAD). You get a warning when it falls back to the branch.
+Without a hook session id (`status`, `preview`), the ledger comes from `CLAUDE_CODE_SESSION_ID`, `CLAUDE_SESSION_ID` or `CODEX_THREAD_ID`, else the current branch (`detached` on a detached HEAD). You get a warning when it falls back to the branch.
 
 ## Configuration
 
@@ -123,8 +123,8 @@ Optional. Put it in `~/.config/agent-ledger/config.json` (yours) or `.agent-ledg
 | `logging` | `all`, `pins-only`, `off` | `pins-only` |
 | `redact` | `on`, `off` | `on` |
 | `prune_days` | days of no activity before a ledger is deleted; `0` = never | `30` |
-| `recent_prompts` / `decisions` | how many come back after compaction | `5` / `10` |
-| `budget_bytes` | size limit of what is re-injected, in bytes, at most 9500 (Claude Code keeps 10,000 characters of hook output, Codex about 10,000 bytes). Older prompts, then decisions, are dropped to fit; pins that still don't fit are left out, and the agent is told so at the top | `9000` |
+| `recent_prompts` | how many come back after compaction (with `logging: all`) | `5` |
+| `budget_bytes` | size limit of what is re-injected, in bytes, at most 9500 (Claude Code keeps 10,000 characters of hook output, Codex about 10,000 bytes). Older prompts are dropped to fit; pins that still don't fit are left out, and the agent is told so at the top | `9000` |
 | `promote_to` | file name `PROMOTE:` writes to | the one of `CLAUDE.md`/`AGENTS.md` that exists; with both, `CLAUDE.md` (what Claude Code reads) unless it imports `@AGENTS.md` or you run Codex; with neither, `AGENTS.md` |
 
 Invalid values are ignored and listed by `agent-ledger config`.
