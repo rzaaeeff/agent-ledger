@@ -1699,3 +1699,15 @@ func TestRepoPromoteToAndFencing(t *testing.T) {
 		t.Errorf("a prompt line passed for a ledger heading: %q", out)
 	}
 }
+
+func TestCommandWithMoreLinesIsNotBlocked(t *testing.T) {
+	e := setup(t)
+	e.say("PIN: freeze the schema", "s1")
+	out := e.say("UNPIN: freeze schema\nNow refactor the parser", "s1")
+	if strings.Contains(out, "block") || !strings.Contains(sysMsg(t, out), "unpinned") {
+		t.Errorf("UNPIN with more lines must reach the agent: %q", out)
+	}
+	if out := e.say("UNPIN: freeze schema", "s1"); !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("a bare command is still blocked: %q", out)
+	}
+}

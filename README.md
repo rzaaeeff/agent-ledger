@@ -42,7 +42,7 @@ then install `agent-ledger` from `/plugins` and approve its hooks.
 
 On first use the plugin downloads one binary (about 3.5 MB) for your OS from the GitHub release into `~/.local/share/agent-ledger/`, and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). The download runs in the background; until it finishes you see "still installing" and prompts are not recorded. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere a `PIN:` tells you so).
 
-Your normal prompts are never blocked. `PINS?`, `LEDGER?`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn; the agent hears about removed or changed pins with your next prompt. If the download fails, the reason goes to `~/.local/state/agent-ledger/skips.log`. If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
+Your normal prompts are never blocked. `PINS?`, `LEDGER?`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about removed or changed pins with your next prompt. If the download fails, the reason goes to `~/.local/state/agent-ledger/skips.log`. If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 
 ## Using it
 
@@ -62,7 +62,7 @@ Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 | `UNPIN: <ref>` | removes a pin | |
 | `PROMOTE: <ref>` | moves a pin into `CLAUDE.md` or `AGENTS.md` (see `promote_to`), uncommitted | |
 
-A `<ref>` is a number from `PINS?`, a pin's id, `last`, or words from the pin. Prefixes work in any case (`pin:` = `PIN:`) but only at the start of the prompt; "pin:" in the middle of a sentence is ignored. A pin is the first line only: the rest of the prompt goes to the agent as usual. Near misses like `PIN; x` or `PIN x` save nothing and tell you so (the prompt still goes to the agent). A lower-case `pin:` saves and offers `UNPIN: last` in case you didn't mean it.
+A `<ref>` is a number from `PINS?`, a pin's id, `last`, or words from the pin. Prefixes work in any case (`pin:` = `PIN:`) but only at the start of the prompt; "pin:" in the middle of a sentence is ignored. A command is the first line only: the rest of the prompt goes to the agent as usual. Near misses like `PIN; x` or `PIN x` save nothing and tell you so (the prompt still goes to the agent). A lower-case `pin:` saves and offers `UNPIN: last` in case you didn't mean it.
 
 You don't have to remember a pin's exact wording:
 

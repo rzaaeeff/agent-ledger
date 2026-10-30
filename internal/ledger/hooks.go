@@ -202,6 +202,10 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		return
 	}
 	out = &suffixWriter{w: out, suffix: note}
+	if _, rest, _ := strings.Cut(prompt, "\n"); strings.TrimSpace(rest) != "" {
+		// More than the command line: don't block, the rest is meant for the agent.
+		out = passWriter{out}
+	}
 	if cmd.ref != "" {
 		rewordPin(h, dir, here, cmd, out)
 		return
@@ -413,6 +417,19 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
 		notice(dir, fmt.Sprintf("The user reworded pin [%s] %q; it is now [%s] %q.", hit.ID, hit.Text, p.ID, p.Text))
 		block(out, fmt.Sprintf("reworded [%s] -> [%s] (%s). %s", hit.ID, p.ID, hit.Where, brief(listPins(h.Cwd, dir, here))))
 	}
+}
+
+// passWriter turns a block into a plain systemMessage, so the prompt still
+// reaches the agent.
+type passWriter struct{ w io.Writer }
+
+func (p passWriter) Write(b []byte) (int, error) {
+	var v map[string]string
+	if json.Unmarshal(b, &v) == nil && v["decision"] == "block" {
+		_, err := fmt.Fprintf(p.w, "%s\n", Marshal(map[string]string{"systemMessage": v["reason"]}))
+		return len(b), err
+	}
+	return p.w.Write(b)
 }
 
 // suffixWriter adds suffix to the systemMessage emitted through it (the redaction note).
