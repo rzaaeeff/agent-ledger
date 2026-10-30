@@ -162,9 +162,17 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		} else if errors.Is(err, ErrNoRepo) {
 			why = "git could not open this folder as a repository, so nothing is stored here. " + strings.TrimPrefix(err.Error(), ErrNoRepo.Error()+"; ")
 		}
-		if q := strings.TrimSpace(h.Prompt); strings.EqualFold(q, "PINS?") || strings.EqualFold(q, "LEDGER?") {
+		q := strings.TrimSpace(h.Prompt)
+		_, isPin := parsePin(h.Prompt)
+		_, rest, _ := strings.Cut(h.Prompt, "\n")
+		switch {
+		case strings.EqualFold(q, "PINS?"), strings.EqualFold(q, "LEDGER?"):
 			block(out, why)
-		} else if _, ok := parsePin(h.Prompt); ok {
+		case isPin && strings.TrimSpace(rest) == "":
+			// The command is the whole prompt: block it, as a working ledger
+			// would, so the agent is never asked to act on "PIN: ...".
+			block(out, "ledger: nothing saved: "+why)
+		case isPin:
 			emit(out, "ledger: nothing saved: "+why)
 		}
 		return
@@ -231,6 +239,11 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			fmt.Fprintf(out, "%s\n", Marshal(v))
 		}
 		return
+	}
+	// A command that is the whole prompt never reaches the model, even when it
+	// fails: otherwise the agent is handed "PIN: ..." and tries to act on it.
+	if _, rest, _ := strings.Cut(prompt, "\n"); strings.TrimSpace(rest) == "" {
+		out = blockWriter{out}
 	}
 	if cmd.scope != "" && cmd.scope != ScopeBranch && cmd.scope != ScopeRepo && cmd.scope != ScopeGlobal {
 		emit(out, fmt.Sprintf("ledger: nothing saved: there is no @%s. Use @branch, @repo or @global.", cmd.scope))

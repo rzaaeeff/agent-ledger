@@ -1448,11 +1448,16 @@ func TestPinUX(t *testing.T) {
 			t.Errorf("prose %q got %q", p, out)
 		}
 	}
-	if msg := sysMsg(t, e.say("PIN@brnch: x", "s1")); !strings.Contains(msg, "no @brnch") {
+	// A failed command that is the whole prompt is still kept from the model.
+	if msg := blockMsg(t, e.say("PIN@brnch: x", "s1")); !strings.Contains(msg, "no @brnch") {
 		t.Errorf("unknown scope: %q", msg)
 	}
-	if msg := sysMsg(t, e.say("PIN:   ", "s1")); !strings.Contains(msg, "needs text") {
+	if msg := blockMsg(t, e.say("PIN:   ", "s1")); !strings.Contains(msg, "needs text") {
 		t.Errorf("empty PIN: %q", msg)
+	}
+	// With more lines the rest is for the agent, so a failure must not block it.
+	if msg := sysMsg(t, e.say("PIN@brnch: x\nwhat does cart.py do?", "s1")); !strings.Contains(msg, "no @brnch") {
+		t.Errorf("unknown scope plus a question: %q", msg)
 	}
 	if n := len(pinTexts(t, f)); n != 0 {
 		t.Errorf("look-alikes saved %d pins", n)
@@ -1609,8 +1614,16 @@ func TestOutsideGitRepo(t *testing.T) {
 		out, _, _ := cli(map[string]string{"prompt": p, "cwd": d, "session_id": "s1"}, "hook", "user-prompt-submit")
 		return out
 	}
-	if msg := sysMsg(t, say("PIN: x")); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git repository") {
+	// A command alone must be blocked, or the agent is handed "PIN: x" to act on.
+	if msg := blockMsg(t, say("PIN: x")); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git repository") {
 		t.Errorf("PIN outside git: %q", msg)
+	}
+	if msg := blockMsg(t, say("UNPIN: x")); !strings.Contains(msg, "git repository") {
+		t.Errorf("UNPIN outside git: %q", msg)
+	}
+	// With more lines, the rest is for the agent: say so, don't block.
+	if msg := sysMsg(t, say("PIN: x\nnow explain cart.py")); !strings.Contains(msg, "nothing saved") {
+		t.Errorf("PIN plus a question outside git: %q", msg)
 	}
 	if out := say("PINS?"); !strings.Contains(out, `"decision":"block"`) || !strings.Contains(out, "git repository") {
 		t.Errorf("PINS? outside git: %q", out)
@@ -1657,7 +1670,7 @@ func TestGitRefusesRepo(t *testing.T) {
 	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
 	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
 	out, _, _ := cli(m{"prompt": "PIN: x", "cwd": bare, "session_id": "s1"}, "hook", "user-prompt-submit")
-	if msg := sysMsg(t, out); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git said") {
+	if msg := blockMsg(t, out); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git said") {
 		t.Errorf("git refusal: %q", msg)
 	}
 }
