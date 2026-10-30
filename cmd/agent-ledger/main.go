@@ -66,7 +66,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "status":
 		dir, err := ledger.Dir("", "")
 		if err != nil {
-			fmt.Fprintln(stdout, "ledger: not in a git repository")
+			// A folder with no repository has its own ledger, so this is git
+			// refusing a folder that does look like one.
+			fmt.Fprintln(stdout, "ledger: unavailable here: "+err.Error())
 			return 0
 		}
 		warnFallback(stderr)
