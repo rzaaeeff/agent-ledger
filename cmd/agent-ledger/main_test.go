@@ -688,6 +688,23 @@ func TestSameNamedReposStayApart(t *testing.T) {
 	}
 }
 
+// moveRepo renames a repo the way a user would. On Windows a handle left by a
+// git subprocess can outlive it by a moment, and the rename fails with "used by
+// another process" until it is released, so retry briefly before giving up.
+func moveRepo(t *testing.T, from, to string) {
+	t.Helper()
+	// Windows also refuses to rename the directory a process is sitting in.
+	t.Chdir(t.TempDir())
+	var err error
+	for i := 0; i < 100; i++ {
+		if err = os.Rename(from, to); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("could not move %s: %v", from, err)
+}
+
 // Moving or renaming a repo used to strand its pins: the ledger name was derived
 // from the repo's path, so the new path meant a new, empty ledger.
 func TestLedgerFollowsRepoMove(t *testing.T) {
@@ -696,12 +713,7 @@ func TestLedgerFollowsRepoMove(t *testing.T) {
 		t.Fatalf("pin not saved: %q", out)
 	}
 	moved := filepath.Join(t.TempDir(), "renamed")
-	// Windows refuses to rename the directory a process is sitting in, and setup
-	// left us inside the repo.
-	t.Chdir(t.TempDir())
-	if err := os.Rename(e.repo, moved); err != nil {
-		t.Fatal(err)
-	}
+	moveRepo(t, e.repo, moved)
 	t.Chdir(moved)
 	out, _, _ := cli(m{"prompt": "PINS?", "cwd": moved, "session_id": "s1"}, "hook", "user-prompt-submit")
 	if !strings.Contains(out, "keep the schema in sync") {
@@ -720,11 +732,7 @@ func TestNewRepoDoesNotInheritOldPath(t *testing.T) {
 		t.Fatalf("pin not saved: %q", out)
 	}
 	moved := filepath.Join(t.TempDir(), "elsewhere")
-	// Windows refuses to rename the directory a process is sitting in.
-	t.Chdir(t.TempDir())
-	if err := os.Rename(e.repo, moved); err != nil {
-		t.Fatal(err)
-	}
+	moveRepo(t, e.repo, moved)
 	e.git("init", "-q", "-b", "main", e.repo)
 	fresh, err := ledger.Root(e.repo)
 	if err != nil {
