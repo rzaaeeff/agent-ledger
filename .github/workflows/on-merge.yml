@@ -69,6 +69,10 @@ jobs:
     # handed to it here.
     permissions:
       contents: read
+      # ci.yml's report job asks for this. A called workflow cannot raise what
+      # it is given, so withholding it would stop the run before it starts,
+      # even though that job is skipped outside a dispatch.
+      statuses: write
     uses: ./.github/workflows/ci.yml
 
   release:

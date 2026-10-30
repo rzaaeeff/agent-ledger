@@ -19,3 +19,28 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
+
+  # A dispatched run is not attached to any pull request, so nothing would
+  # show there. Post the result as a commit status instead, which does.
+  report:
+    needs: test
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.test.result }}
+          URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          if [ "$RESULT" = success ]; then
+            state=success
+            text="all three platforms passed"
+          else
+            state=failure
+            text="$RESULT on at least one platform"
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state="$state" -f context=ci -f description="$text" -f target_url="$URL"
