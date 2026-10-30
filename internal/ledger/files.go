@@ -97,8 +97,8 @@ func writeReplace(path string, data []byte) error {
 	return nil
 }
 
-// retryBusy runs fn, retrying for up to two seconds. On Windows a rename or
-// remove fails outright while any other handle on the file is open, and Go
+// retryBusy runs fn, retrying with backoff for about half a second. On Windows a
+// rename or remove fails outright while any other handle on the file is open, and Go
 // opens files without FILE_SHARE_DELETE, so an unlocked read elsewhere (a
 // listing, say) is enough to break an otherwise correct locked write.
 func retryBusy(fn func() error) error {

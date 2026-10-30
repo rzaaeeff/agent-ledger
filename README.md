@@ -1,16 +1,20 @@
 # agent-ledger
 
-You tell the agent "don't touch the migrations". An hour later the context compacts, and that line is gone.
+[![Release](https://img.shields.io/github/v/release/rzaaeeff/agent-ledger)](https://github.com/rzaaeeff/agent-ledger/releases/latest) [![CI](https://github.com/rzaaeeff/agent-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/rzaaeeff/agent-ledger/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-agent-ledger keeps the lines you mark and puts them back after every compaction. It is a small local hook for Claude Code and Codex: no model calls, no server, no database.
+When Claude Code compacts a conversation, your earlier instructions survive only as well as the model-written summary keeps them. In a short session that is often word for word. Over a long one, a rule can come back reworded or not at all ([#94564](https://github.com/anthropics/claude-code/issues/94564), [#104779](https://github.com/anthropics/claude-code/issues/104779)).
+
+agent-ledger keeps the lines you mark with `PIN:` outside the conversation and puts them back after every compaction, byte for byte, whatever the summary did. It is a small local hook for Claude Code and Codex: no model calls, no server, no database.
+
+![Typing a PIN: line, running /compact, and the agent quoting the pin back word for word](docs/demo.gif)
 
 ```
 PIN: don't touch the migrations, the schema is frozen until Friday
 ```
 
-After `/compact`, the agent sees that pin again, word for word. You get a one-line note saying what was restored.
+After `/compact`, the agent sees that pin again, word for word, and you get a one-line note saying what was restored.
 
-**Status: v0.1, early.** Tests feed the hooks the JSON Claude Code and Codex send, and live runs (Claude Code 2.1.314 on Linux, Claude Code 2.1.284 on native Windows with Git Bash, Codex 0.164.0) restored pins word for word after compaction. That is a few runs by one person, not wide use: please report what breaks.
+**Status: v0.1, early.** Tested live on Claude Code 2.1.314 (Linux) and 2.1.284 (Windows, Git Bash), and Codex 0.164 and 0.166 (Linux); CI runs the tests on Linux, macOS and Windows. That is one person's runs, not wide use: please report what breaks.
 
 ## Is it for you?
 
@@ -41,9 +45,7 @@ codex plugin add agent-ledger@agent-ledger
 
 then start Codex and, at "Hooks need review", trust the agent-ledger hooks. Each update asks again.
 
-On first use the plugin downloads one binary (about 3 MB) for your OS from the GitHub release into the plugin's data folder (`~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). Your first prompt waits up to a few seconds for the download. If it isn't done by then, you see "still installing": that prompt is not recorded, and a ledger command is blocked so you can send it again. If the download fails, you are told on each prompt, with the path of a marker file you can delete to retry at once; otherwise it retries after 5 minutes, then hourly. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere a `PIN:` tells you so).
-
-Your normal prompts are never blocked. Slash commands, `PIN:`, `PINS?`, `LEDGER?`, `CARRY:`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about new, removed or changed pins with your next prompt. In Claude Code the command stays in the input box after the reply; clear it (Ctrl+U) before typing on. If the download fails, the reason goes to `skips.log` in `~/.local/state/agent-ledger/` (or `$XDG_STATE_HOME/agent-ledger/`). If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
+On first use the plugin downloads one binary (about 3 MB) from the GitHub release; your first prompt waits a few seconds for it. It works only inside a git repository. Requirements, checksums and failure handling are under [How the install works](#how-the-install-works).
 
 ## Using it
 
@@ -92,7 +94,7 @@ Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): C
 
 **`CLAUDE.md` / `AGENTS.md`** are the right place for rules that hold forever, and the agent already rereads them after compaction. They are the wrong place for "until Friday", "on this branch only" or "for this chat only": you have to open a file, edit it, and remember to take it out again, and in a shared repo your teammates get your temporary rule too. Pins are one line, scoped, and removable with `UNPIN: friday`. When a pin turns out to be permanent, `PROMOTE:` moves it into that file for you.
 
-**A five-line `SessionStart` hook** that cats a file into the context is genuinely most of the restore, and the Claude Code docs show one. What the five lines don't give you: scopes (chat, branch, repo, global) and a `/clear` lifetime for each, removing a pin by words rather than exact text, a handover into the next chat, a size budget that fits under the 10k hook limit so the restore isn't truncated, secret masking before anything is written, idle ledgers pruned after 30 days, the same behaviour in Codex, and commands that cost no model turn. If you only need the restore, write the five lines; this exists for when that stops being enough.
+**A five-line `SessionStart` hook** that cats a file into the context is genuinely most of the restore, and the Claude Code docs show one. What the five lines don't give you: scopes (chat, branch, repo, global) and a `/clear` lifetime for each, removing a pin by words rather than exact text, a handover into the next chat, a size budget that fits under the 10k hook limit so the restore isn't truncated, secret masking before anything is written, idle ledgers pruned after 30 days, most of the same behaviour in Codex (not the `/clear` handover, which Codex gives no hook for), and commands that cost no model turn. If you only need the restore, write the five lines; this exists for when that stops being enough.
 
 **Automatic memory tools** (claude-mem and similar) capture everything and compress it with a model. That is a different trade: broader coverage, paraphrased text, model calls. agent-ledger keeps only what you mark, and keeps it byte for byte.
 
@@ -100,7 +102,7 @@ Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): C
 
 - By default only ledger commands are logged, not your other prompts. `"logging": "all"` also logs every prompt, and then your last 5 come back after compaction.
 - Before anything is stored, common secrets are masked: API keys, GitHub/Slack/AWS tokens, private keys, JWTs, Stripe keys, Slack webhook URLs, URL passwords, and `password=`-style values (also names like `db_password`, quoted or not). This is pattern matching. It will miss some secrets, and it can mask harmless text that looks like one.
-- Files stay on your machine, under `~/.local/state/agent-ledger/` and readable only by you. The tool itself makes no network calls apart from the one-time binary download; what it re-injects goes to your model provider like the rest of the chat. When a session starts, ledgers in that repo untouched for 30 days are deleted, including their `PIN!:` pins. `PIN@branch:` pins go once the branch is deleted and idle. Repo and global pins are kept until you `UNPIN` them.
+- Files stay on your machine, under `~/.local/state/agent-ledger/` and readable only by you. The tool itself makes no network calls apart from downloading its own binary and checksum file from the GitHub release (retried until it succeeds); what it re-injects goes to your model provider like the rest of the chat. When a session starts, ledgers in that repo untouched for 30 days are deleted, including their `PIN!:` pins. `PIN@branch:` pins go once the branch is deleted and idle. Repo and global pins are kept until you `UNPIN` them.
 - A repo's `.agent-ledger.json` can only make `logging`, `redact`, `key` and `prune_days` stricter than your own settings, and its `promote_to` may only be `AGENTS.md` or `CLAUDE.md`. Anything else is ignored; the session-start note says so and `agent-ledger config` says why.
 - What comes back after compaction is framed for the agent as your notes: pins are your words; recent prompts are quoted context, not new instructions. That lowers the risk of old text being read as a fresh order; it does not remove it.
 
@@ -143,6 +145,12 @@ Optional. Put it in `~/.config/agent-ledger/config.json` (yours) or `.agent-ledg
 | `promote_to` | file name `PROMOTE:` writes to | the one of `CLAUDE.md`/`AGENTS.md` that exists; with both, `CLAUDE.md` (what Claude Code reads) unless it imports `@AGENTS.md` or you run Codex; with neither, `AGENTS.md` |
 
 Invalid values are ignored and listed by `agent-ledger config`.
+
+## How the install works
+
+On first use the plugin downloads one binary (about 3 MB) for your OS from the GitHub release into the plugin's data folder (`~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). Your first prompt waits up to a few seconds for the download. If it isn't done by then, you see "still installing": that prompt is not recorded, and a ledger command is blocked so you can send it again. If the download fails, you are told on each prompt, with the path of a marker file you can delete to retry at once; otherwise it retries after 5 minutes, then hourly. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere a `PIN:` tells you so).
+
+Your normal prompts are never blocked. Slash commands, `PIN:`, `PINS?`, `LEDGER?`, `CARRY:`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about new, removed or changed pins with your next prompt. In Claude Code the command stays in the input box after the reply; clear it (Ctrl+U) before typing on. If the download fails, the reason goes to `skips.log` in `~/.local/state/agent-ledger/` (or `$XDG_STATE_HOME/agent-ledger/`). If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 
 ## Cost
 
