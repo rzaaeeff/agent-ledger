@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -47,8 +48,27 @@ func Marshal(v any) []byte {
 	return bytes.TrimRight(b.Bytes(), "\n")
 }
 
-// MkdirPrivate creates dir (and parents) readable by the owner only.
-func MkdirPrivate(dir string) error { return os.MkdirAll(dir, 0o700) }
+// MkdirPrivate creates dir (and parents) readable by the owner only, and tightens
+// anything already there: another tool may have made the state folder first, with
+// its own umask, and MkdirAll leaves an existing folder's mode alone.
+func MkdirPrivate(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	home := StateHome()
+	for p := dir; strings.HasPrefix(p, home); p = filepath.Dir(p) {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().Perm()&0o077 != 0 {
+			_ = os.Chmod(p, fi.Mode().Perm()&^0o077)
+		}
+		if p == home {
+			break
+		}
+	}
+	return nil
+}
 
 // withLock runs fn holding an exclusive lock on path+".lock", so parallel hooks
 // never interleave or lose writes.
@@ -159,10 +179,18 @@ func Status(dir string) string {
 	for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
 		chars += len(p.Text) + 1
 	}
-	return fmt.Sprintf("ledger: %d pins (~%d tokens) | %d prompts | %d errors",
-		countLines(filepath.Join(dir, PinnedFile)), chars/4,
-		countLines(filepath.Join(dir, PromptsFile)),
-		countLines(filepath.Join(dir, ErrorsFile)))
+	return fmt.Sprintf("ledger: %s (~%d tokens) | %s | %s",
+		plural(countLines(filepath.Join(dir, PinnedFile)), "pin"), chars/4,
+		plural(countLines(filepath.Join(dir, PromptsFile)), "logged prompt"),
+		plural(countLines(filepath.Join(dir, ErrorsFile)), "error"))
+}
+
+// plural is "1 pin", "2 pins".
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
 }
 
 // Unpin removes pin p (same id and lifetime: older ledgers can hold a PIN and a

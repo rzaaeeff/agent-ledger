@@ -244,17 +244,38 @@ func refList(ps []located) string {
 }
 
 // PinsList is the text PINS? shows the user (never the model).
-func PinsList(pins []located) string {
+func PinsList(pins []located, codex bool) string {
 	if len(pins) == 0 {
-		return "No pins here. Start a prompt with PIN: (or send /pin <text>) to add one."
+		cmd := "/pin"
+		if codex {
+			cmd = "$pin"
+		}
+		return "No pins here. Start a prompt with PIN: (or send " + cmd + " <text>) to add one."
 	}
 	var b strings.Builder
 	b.WriteString("Pins (shown to you only; the agent did not see this prompt):")
 	for i, p := range pins {
-		fmt.Fprintf(&b, "\n%d. [%s] %s (%s)", i+1, p.ID, p.Text, p.Where)
+		fmt.Fprintf(&b, "\n%d. [%s] %s (%s)", i+1, p.ID, p.Text, codexWhere(p.Where, codex))
 	}
 	b.WriteString("\nUNPIN: <number, id, words or last> removes one.")
 	return b.String()
+}
+
+// codexWhere keeps a scope label from promising what Codex cannot do: it starts a
+// chat it cannot link to the one it replaced, so a PIN! and a CARRY both end with
+// /clear there. Saying "kept across /clear" next to a note saying the opposite is
+// worse than saying neither.
+func codexWhere(where string, codex bool) string {
+	if !codex {
+		return where
+	}
+	switch {
+	case strings.HasSuffix(where, ", kept across /clear"):
+		return strings.TrimSuffix(where, ", kept across /clear") + ", kept across /clear in Claude Code only"
+	case strings.HasPrefix(where, "CARRY, "):
+		return "CARRY, which Codex cannot hand to the next chat"
+	}
+	return where
 }
 
 // CodexClearNote warns that Codex starts a chat it cannot link to the one it
@@ -263,7 +284,7 @@ func PinsList(pins []located) string {
 func CodexClearNote(pins []located) string {
 	for _, p := range pins {
 		if p.Life == LifeKeep || p.Life == LifeCarry {
-			return "\nNote: Codex starts a chat it cannot link, so PIN! and CARRY items do not arrive after /clear there. Use PIN@branch: or PIN@repo: instead."
+			return "\nNote: Codex starts a chat it cannot link to this one, so PIN! and CARRY items do not arrive after /clear. Use a scope that does: PIN@repo:, PIN@branch: or PIN@global:."
 		}
 	}
 	return ""
@@ -271,7 +292,7 @@ func CodexClearNote(pins []located) string {
 
 // brief is the short state appended to PIN/UNPIN replies; CARRY items wait for
 // the next /clear, so they are counted apart.
-func brief(pins []located) string {
+func brief(pins []located, codex bool) string {
 	n, c := 0, 0
 	for _, p := range pins {
 		if p.Life == LifeCarry {
@@ -281,6 +302,11 @@ func brief(pins []located) string {
 		}
 	}
 	if c > 0 {
+		// Under Codex nothing is waiting: /clear starts a chat it cannot link, so
+		// the item stays in this ledger until the chat's ledger is pruned.
+		if codex {
+			return fmt.Sprintf("(%s; %d CARRY that Codex cannot hand over)", pinsApply(n), c)
+		}
 		return fmt.Sprintf("(%s; %d CARRY waiting for /clear)", pinsApply(n), c)
 	}
 	return "(" + pinsApply(n) + ")"
@@ -308,21 +334,31 @@ func fileExists(p string) bool { _, err := os.Lstat(p); return err == nil }
 
 // HelpText is what LEDGER? shows the user (never the model). In a folder with no
 // repository it drops the two verbs that need one, rather than offering help that
-// only ends in a refusal.
-func HelpText(status string, folder bool) string {
+// only ends in a refusal. Under Codex it says what PIN! and CARRY really do there:
+// Codex starts a chat it cannot link, so neither survives /clear.
+func HelpText(status string, folder, codex bool) string {
 	scopes := "  PIN@branch: / PIN@repo: / PIN@global: <text>   every chat on the branch / in the repo / everywhere\n"
 	promote := "  PROMOTE: <ref>          move a pin into CLAUDE.md or AGENTS.md (uncommitted)\n"
 	if folder {
 		scopes = "  PIN@repo: / PIN@global: <text>   every chat in this folder / everywhere\n"
 		promote = ""
 	}
-	return `agent-ledger keeps the lines you mark and puts them back after compaction.
-Start a prompt with (any case; only at the start):
-  PIN: <text>             keep in this chat (dropped on /clear)
+	keep := `  PIN: <text>             keep in this chat (dropped on /clear)
   PIN!: <text>            keep in this chat, also across /clear
   CARRY: <text>           where you left off, for the next chat after
                           /clear; delivered once, then deleted (not a pin)
-` + scopes + `  PIN [ref]: <new text>   reword a pin
+`
+	if codex {
+		keep = `  PIN: <text>             keep in this chat
+  PIN!: <text>            keep in this chat (Codex starts a chat it cannot
+                          link, so this does not survive /clear here)
+  CARRY: <text>           where you left off, for the next chat; Codex
+                          cannot hand it over, so use PIN@repo: instead
+`
+	}
+	return `agent-ledger keeps the lines you mark and puts them back after compaction.
+Start a prompt with (any case; only at the start):
+` + keep + scopes + `  PIN [ref]: <new text>   reword a pin
   UNPIN: <ref>            remove a pin
 ` + promote + `  PINS?                   list pins          LEDGER?   this help
 <ref> is a number from PINS?, an id, "last", or words from the pin.

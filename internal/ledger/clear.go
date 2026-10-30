@@ -127,19 +127,22 @@ func (n Note) empty() bool { return len(n.Pins)+len(n.Kept)+len(n.Carry) == 0 }
 // /clear may have started a new id), those of the session that left the newest
 // note from the same cwd in the last 10 minutes.
 // If notes of more than one other session qualify, it cannot tell which chat was
-// cleared and takes none (ambiguous reports it): kept pins reach the model, so a
-// guess could hand one chat's rules to another. Notes older than a day are dropped.
+// cleared and takes none: kept pins reach the model, so a guess could hand one
+// chat's rules to another. The ambiguous notes come back instead, so this chat can
+// be told exactly what was not carried over, and they are removed: no later chat
+// could resolve them either, and leaving them refuses every /clear in that folder
+// for the next ten minutes. Notes older than a day are dropped.
 // reported says a /clear from cwd left a note in the last 10 minutes, even an
 // empty one (nothing to hand over); empty notes are never picked from another session.
-func TakeCleared(root, sid, cwd string, isNew bool) (pick *Note, ambiguous, reported bool) {
+func TakeCleared(root, sid, cwd string, isNew bool) (pick, ambiguous *Note, reported bool) {
 	path := filepath.Join(root, NotesFile)
 	if _, err := os.Stat(path); err != nil {
-		return nil, false, false
+		return nil, nil, false
 	}
 	_ = withLock(path, func() error {
 		now := Now().Unix()
 		notes := ReadJSONL[Note](path)
-		from := ""
+		from, stuck := "", map[string]bool{}
 		for _, n := range notes {
 			if n.Session == sid {
 				from, reported = sid, true
@@ -157,14 +160,17 @@ func TakeCleared(root, sid, cwd string, isNew bool) (pick *Note, ambiguous, repo
 				}
 			}
 			if len(seen) > 1 {
-				from, ambiguous = "", true
+				from, stuck = "", seen
 			}
 		}
 		var keep []string
 		for _, n := range notes {
-			if from != "" && n.Session == from {
+			switch {
+			case from != "" && n.Session == from:
 				pick = mergeNote(pick, n)
-			} else if n.Epoch > now-86400 {
+			case stuck[n.Session]:
+				ambiguous = mergeNote(ambiguous, n)
+			case n.Epoch > now-86400:
 				keep = append(keep, string(Marshal(n)))
 			}
 		}

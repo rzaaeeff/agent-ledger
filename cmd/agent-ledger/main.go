@@ -81,18 +81,29 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		warnFallback(stderr, dir)
 		cwd, _ := os.Getwd()
 		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-			fmt.Fprintf(stdout, "ledger: empty (%s)\n", dir)
+			fmt.Fprintln(stdout, "ledger: empty")
 		} else {
 			fmt.Fprintln(stdout, ledger.Status(dir))
 		}
 		if s := ledger.ScopeStatus(cwd, dir); s != "" {
 			fmt.Fprintln(stdout, s)
 		}
+		// Which folder, always: it is how you tell two ledgers apart, and the only
+		// way to see that a repo fell back to being known by its path.
+		fmt.Fprintln(stdout, "folder: "+dir)
 		return 0
 	case "config":
 		cwd, _ := os.Getwd()
 		fmt.Fprintln(stdout, ledger.LoadConfig(cwd).Describe())
-		fmt.Fprintln(stdout, "files: user", ledger.UserConfigPath()+", repo", ledger.RepoConfigPath(cwd))
+		// Say which of the two files are actually there: the list read as if both
+		// existed, so a setting looked ignored rather than never written.
+		for _, f := range []struct{ what, path string }{{"user", ledger.UserConfigPath()}, {"repo", ledger.RepoConfigPath(cwd)}} {
+			state := "not present"
+			if _, err := os.Stat(f.path); err == nil {
+				state = "read"
+			}
+			fmt.Fprintf(stdout, "file: %s %s (%s)\n", f.what, f.path, state)
+		}
 		return 0
 	case "preview":
 		source := "compact"
