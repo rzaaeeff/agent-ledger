@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Report privately through GitHub: **Security → Report a vulnerability** on
+Report privately through GitHub: the **Security** tab, then **Report a vulnerability** on
 https://github.com/rzaaeeff/agent-ledger. Please do not open a public issue for
 anything exploitable.
 
