@@ -1,0 +1,48 @@
+name: Pin not restored
+description: A pin did not come back, or came back wrong, after compaction or /clear.
+labels: [bug]
+body:
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Tool
+      options:
+        - Claude Code
+        - Codex
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions and OS
+      placeholder: agent-ledger 0.1.3, Claude Code 2.1.314, macOS 15
+    validations:
+      required: true
+  - type: textarea
+    id: pin
+    attributes:
+      label: What you pinned
+      description: The exact command, including the prefix (`PIN:`, `PIN!:`, `PIN@branch:`, `CARRY:`, `/pin`...). Replace anything private.
+    validations:
+      required: true
+  - type: dropdown
+    id: event
+    attributes:
+      label: What happened before it went missing
+      options:
+        - Manual /compact
+        - Automatic compaction
+        - /clear
+        - New chat (/new, restart, resume)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: seen
+    attributes:
+      label: What the agent saw
+      description: |
+        Did you get a "restored N pins" note? What did the agent say when asked about the rule?
+        If you can, add the output of `agent-ledger preview` (or `preview clear`) run from the agent's shell.
+    validations:
+      required: true
