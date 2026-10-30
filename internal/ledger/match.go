@@ -246,7 +246,7 @@ func refList(ps []located) string {
 // PinsList is the text PINS? shows the user (never the model).
 func PinsList(pins []located) string {
 	if len(pins) == 0 {
-		return "No pins here. Start a prompt with PIN: to add one."
+		return "No pins here. Start a prompt with PIN: (or send /pin <text>) to add one."
 	}
 	var b strings.Builder
 	b.WriteString("Pins (shown to you only; the agent did not see this prompt):")
@@ -255,6 +255,18 @@ func PinsList(pins []located) string {
 	}
 	b.WriteString("\nUNPIN: <number, id, words or last> removes one.")
 	return b.String()
+}
+
+// CodexClearNote warns that Codex starts a chat it cannot link to the one it
+// replaced, so PIN! and CARRY items never arrive there. Empty when no listed
+// pin depends on that handover.
+func CodexClearNote(pins []located) string {
+	for _, p := range pins {
+		if p.Life == LifeKeep || p.Life == LifeCarry {
+			return "\nNote: Codex starts a chat it cannot link, so PIN! and CARRY items do not arrive after /clear there. Use PIN@branch: or PIN@repo: instead."
+		}
+	}
+	return ""
 }
 
 // brief is the short state appended to PIN/UNPIN replies; CARRY items wait for

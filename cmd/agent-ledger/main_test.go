@@ -1895,4 +1895,18 @@ func TestSlashCommands(t *testing.T) {
 	if got := strings.Join(pinTexts(t, filepath.Join(e.dir("c1"), "pinned.jsonl")), ","); got != "codex rule|,second rule|" {
 		t.Errorf("Codex stored: %s", got)
 	}
+
+	// Codex has no /clear handover, so PIN! and CARRY must not promise one.
+	for _, p := range []string{"PIN!: kept rule", "CARRY: handoff note"} {
+		r := blockMsg(t, codex(p))
+		if !strings.Contains(r, "Codex") || !strings.Contains(r, "PIN@branch:") {
+			t.Errorf("Codex %q must warn the handover is lost: %q", p, r)
+		}
+	}
+	if r := blockMsg(t, codex("PINS?")); !strings.Contains(r, "do not arrive after /clear") {
+		t.Errorf("Codex PINS? must note the lost handover: %q", r)
+	}
+	if r := blockMsg(t, e.say("PIN!: cc kept", "s9")); strings.Contains(r, "Codex") {
+		t.Errorf("Claude Code must not get the Codex warning: %q", r)
+	}
 }

@@ -1,5 +1,6 @@
 {
   "name": "agent-ledger",
+  "description": "Pins that survive context compaction: type PIN: before a rule and it comes back word for word. Local, no model calls.",
   "owner": { "name": "Heydar Rzayev", "url": "https://github.com/rzaaeeff" },
   "plugins": [
     {

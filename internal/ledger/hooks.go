@@ -176,7 +176,12 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	// Blocking the prompt shows the reason to the user only: no model turn.
 	switch q := strings.TrimSpace(h.Prompt); {
 	case strings.EqualFold(q, "PINS?"):
-		block(out, PinsList(listPins(h.Cwd, dir, here)))
+		pins := listPins(h.Cwd, dir, here)
+		msg := PinsList(pins)
+		if codex {
+			msg += CodexClearNote(pins)
+		}
+		block(out, msg)
 		return
 	case strings.EqualFold(q, "LEDGER?"):
 		block(out, HelpText(Status(dir)))
@@ -268,8 +273,14 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			return
 		case cmd.verb == "CARRY":
 			life, where = LifeCarry, " for the chat after the next /clear"
+			if codex {
+				where = " for the chat after the next /clear, but Codex starts a chat it cannot link, so it will not arrive there; use PIN@branch: or PIN@repo: instead"
+			}
 		case cmd.scope == "" && cmd.keep:
 			life, where = LifeKeep, " (kept across /clear)"
+			if codex {
+				where = " (kept across /clear in Claude Code only: Codex starts a chat it cannot link, so use PIN@branch: or PIN@repo: there)"
+			}
 		case cmd.scope == ScopeBranch:
 			b, _ := git(h.Cwd, "branch", "--show-current")
 			if b == "" || DefaultBranches(h.Cwd)[b] {

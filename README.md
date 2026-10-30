@@ -36,8 +36,6 @@ Codex (macOS and Linux; experimental):
 
 ```
 codex plugin marketplace add rzaaeeff/agent-ledger
-```
-
 codex plugin add agent-ledger@agent-ledger
 ```
 
@@ -69,6 +67,8 @@ In Claude Code each one is also a slash command: `/pin <text>`, `/pin ! <text>`,
 
 A `<ref>` is a number from `PINS?`, a pin's id, `last`, or words from the pin. Prefixes work in any case (`pin:` = `PIN:`) but only at the start of the prompt; "pin:" in the middle of a sentence is ignored. A command is the first line only: the rest of the prompt goes to the agent as usual. Near misses like `PIN; x` or `PIN x` save nothing and tell you so (the prompt still goes to the agent). A lower-case `pin:` saves and offers `UNPIN: last` in case you didn't mean it.
 
+Claude Code prefixes every reply to a command with `UserPromptSubmit operation blocked by hook:`. That label is Claude Code's and the plugin cannot change it. It means the command was handled locally and never reached the model, which is the point: the reply after it (`pinned [a1b2]. (2 pins apply here)`) is the result. Nothing was rejected.
+
 You don't have to remember a pin's exact wording:
 
 - `UNPIN: friday migrations` finds "Don't touch the migrations until Friday": case, punctuation and word order don't matter, and a word of 4+ letters also matches longer words starting with it (`migration` finds "migrations"). Words match whole, so `all` does not find "called"; refs under 3 letters only match ids. `UNPIN: last` takes the newest pin, `UNPIN: 2` the second one in `PINS?`.
@@ -87,6 +87,14 @@ agent-ledger preview          # or: preview clear
 ```
 
 Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): Claude Code puts plugin `bin/` folders on its shell's PATH, and from a normal terminal there is no session id, so you'd see the branch ledger, not your chat's. In Codex, call the plugin's `bin/agent-ledger` by full path. Both find the binary under `CLAUDE_CONFIG_DIR` or `CODEX_HOME` if you set them.
+
+## Why not `CLAUDE.md`, or a five-line hook?
+
+**`CLAUDE.md` / `AGENTS.md`** are the right place for rules that hold forever, and the agent already rereads them after compaction. They are the wrong place for "until Friday", "on this branch only" or "for this chat only": you have to open a file, edit it, and remember to take it out again, and in a shared repo your teammates get your temporary rule too. Pins are one line, scoped, and removable with `UNPIN: friday`. When a pin turns out to be permanent, `PROMOTE:` moves it into that file for you.
+
+**A five-line `SessionStart` hook** that cats a file into the context is genuinely most of the restore, and the Claude Code docs show one. What the five lines don't give you: scopes (chat, branch, repo, global) and a `/clear` lifetime for each, removing a pin by words rather than exact text, a handover into the next chat, a size budget that fits under the 10k hook limit so the restore isn't truncated, secret masking before anything is written, idle ledgers pruned after 30 days, the same behaviour in Codex, and commands that cost no model turn. If you only need the restore, write the five lines; this exists for when that stops being enough.
+
+**Automatic memory tools** (claude-mem and similar) capture everything and compress it with a model. That is a different trade: broader coverage, paraphrased text, model calls. agent-ledger keeps only what you mark, and keeps it byte for byte.
 
 ## Privacy
 

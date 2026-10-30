@@ -1,7 +1,7 @@
 ---
 name: unpin
 description: Remove an agent-ledger pin by number, id, words or "last".
-argument-hint: "<number | id | words | last>"
+argument-hint: "[number | id | words | last]"
 disable-model-invocation: true
 ---
 This command is handled by the agent-ledger plugin before it reaches you, so you should never see this text.
