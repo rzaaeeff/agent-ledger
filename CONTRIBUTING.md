@@ -25,6 +25,8 @@ gh workflow run ci.yml --ref <your branch>
 gh run watch
 ```
 
+Or the Actions tab: pick `ci` on the left, then "Run workflow". GitHub reads that button from the default branch, so a branch that removes `workflow_dispatch` still shows it and still fails.
+
 Nothing can be released untested, though. Merging to `master` publishes whatever version `VERSION` names, and before it does, it looks for a successful `ci` run for that code, on the merge commit or on the pull request's head. If it finds none, it runs the full matrix itself and releases only if that passes. The Actions summary for the merge says which of the two happened, so a bypassed pull request is visible after the fact.
 
 So: bump `VERSION` in a pull request when the change should ship, and merging releases it. Leave `VERSION` alone and the merge publishes nothing, which the summary says plainly.
