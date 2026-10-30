@@ -1,10 +1,9 @@
 name: ci
 on:
-  # No run per commit: start one with `gh workflow run ci.yml --ref <branch>`.
-  # master still runs on its own so the README's badge stays honest.
+  # No run per commit. Start one with `gh workflow run ci.yml --ref <branch>`;
+  # on-merge.yml runs these same tests before it releases anything.
   workflow_dispatch:
-  push:
-    branches: [master]
+  workflow_call:
 permissions:
   contents: read
 jobs:

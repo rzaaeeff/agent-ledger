@@ -1,6 +1,6 @@
 # agent-ledger
 
-[![Release](https://img.shields.io/github/v/release/rzaaeeff/agent-ledger)](https://github.com/rzaaeeff/agent-ledger/releases/latest) [![CI](https://github.com/rzaaeeff/agent-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/rzaaeeff/agent-ledger/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/rzaaeeff/agent-ledger)](https://github.com/rzaaeeff/agent-ledger/releases/latest) [![CI](https://img.shields.io/github/actions/workflow/status/rzaaeeff/agent-ledger/on-merge.yml?branch=master&label=CI)](https://github.com/rzaaeeff/agent-ledger/actions/workflows/on-merge.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 When Claude Code compacts a conversation, your earlier instructions survive only as well as the model-written summary keeps them. In a short session that is often word for word. Over a long one, a rule can come back reworded or not at all ([#94564](https://github.com/anthropics/claude-code/issues/94564), [#104779](https://github.com/anthropics/claude-code/issues/104779)).
 

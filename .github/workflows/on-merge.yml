@@ -1,0 +1,75 @@
+name: on merge
+# Merging to master releases whatever VERSION names, but only after the full
+# test matrix has passed for that code. CI is manual, so a pull request may
+# have been merged without ever being checked; this finds out, and runs the
+# tests itself when it was not.
+on:
+  push:
+    branches: [master]
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      tested: ${{ steps.check.outputs.tested }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="v$(cat VERSION)"
+
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            release=false
+            echo "$tag is already released, so this merge publishes nothing." >>"$GITHUB_STEP_SUMMARY"
+          else
+            release=true
+          fi
+
+          # A squash or rebase merge gives master a new sha, so also look at the
+          # pull request this commit came from.
+          shas="$GITHUB_SHA"
+          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+            --jq '.[0].head.sha // empty' 2>/dev/null || true)
+          if [ -n "$head" ]; then
+            shas="$shas $head"
+          fi
+
+          tested=false
+          for s in $shas; do
+            n=$(gh run list --workflow ci.yml --commit "$s" --status success \
+              --json databaseId --jq 'length' || echo 0)
+            if [ "$n" -gt 0 ]; then
+              tested=true
+              echo "ci passed for $(echo "$s" | cut -c1-7)." >>"$GITHUB_STEP_SUMMARY"
+              break
+            fi
+          done
+          if [ "$tested" = false ]; then
+            echo "No successful ci run for this change; the tests run again below before anything is published." >>"$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "release=$release" >>"$GITHUB_OUTPUT"
+          echo "tested=$tested" >>"$GITHUB_OUTPUT"
+
+  test:
+    needs: gate
+    if: needs.gate.outputs.release == 'true' && needs.gate.outputs.tested != 'true'
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: [gate, test]
+    # test is skipped when ci already passed, which must not skip this.
+    if: ${{ !cancelled() && !failure() && needs.gate.outputs.release == 'true' }}
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write

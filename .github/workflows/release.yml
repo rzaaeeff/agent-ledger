@@ -2,6 +2,8 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Called by on-merge.yml once the tests for that commit are green.
+  workflow_call:
 permissions: {}
 jobs:
   release:
@@ -15,12 +17,25 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+      - id: v
+        # A tag must name the version in VERSION. Called from a merge there is
+        # no tag yet, so VERSION decides it and the release creates it.
+        run: |
+          set -eu
+          tag="v$(cat VERSION)"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$tag" != "$GITHUB_REF_NAME" ]; then
+            echo "VERSION says $tag but the tag is $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
       - run: go test ./...
-      - run: scripts/release.sh "${GITHUB_REF_NAME#v}"
+      - run: scripts/release.sh "${TAG#v}"
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: dist/agent-ledger-*
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+      - run: gh release create "$TAG" dist/* --generate-notes --target "$GITHUB_SHA"
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
