@@ -342,7 +342,9 @@ func TestBranchFallback(t *testing.T) {
 	}
 	e.checkout("main")
 	t.Chdir(t.TempDir())
-	if out, _, _ := cli(nil, "status"); out != "ledger: not in a git repository\n" {
+	// Outside a repo there is no branch to fall back to, so one ledger serves the
+	// folder's sessionless chats.
+	if out, _, _ := cli(nil, "status"); !strings.Contains(out, string(filepath.Separator)+"@dir-") || !strings.HasSuffix(strings.TrimSpace(out), ledger.RepoKey+")") {
 		t.Errorf("status outside a repo = %q", out)
 	}
 	if out, _, rc := cli(nil, "inject"); out != "" || rc != 0 {
@@ -1723,6 +1725,8 @@ func TestNoticesReachTheModel(t *testing.T) {
 	}
 }
 
+// A chat that spans several repos lives in a plain folder. It still gets pins;
+// only the verbs that name a branch or a work tree have nothing to work with.
 func TestOutsideGitRepo(t *testing.T) {
 	setup(t)
 	d := t.TempDir()
@@ -1730,22 +1734,55 @@ func TestOutsideGitRepo(t *testing.T) {
 		out, _, _ := cli(map[string]string{"prompt": p, "cwd": d, "session_id": "s1"}, "hook", "user-prompt-submit")
 		return out
 	}
-	// A command alone must be blocked, or the agent is handed "PIN: x" to act on.
-	if msg := blockMsg(t, say("PIN: x")); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git repository") {
+	if msg := blockMsg(t, say("PIN: use the staging bucket")); !strings.Contains(msg, "pinned") {
 		t.Errorf("PIN outside git: %q", msg)
 	}
-	if msg := blockMsg(t, say("UNPIN: x")); !strings.Contains(msg, "git repository") {
+	if msg := blockMsg(t, say("PINS?")); !strings.Contains(msg, "use the staging bucket") {
+		t.Errorf("PINS? outside git: %q", msg)
+	}
+	// Folder-wide pins are what a chat covering several repos actually wants.
+	if msg := blockMsg(t, say("PIN@repo: ask before pushing")); !strings.Contains(msg, "for this folder") {
+		t.Errorf("PIN@repo outside git: %q", msg)
+	}
+	// There is no branch here, so say that rather than report a detached HEAD.
+	if msg := blockMsg(t, say("PIN@branch: x")); !strings.Contains(msg, "not in a git repository") || !strings.Contains(msg, "PIN@repo:") {
+		t.Errorf("PIN@branch outside git: %q", msg)
+	}
+	if msg := blockMsg(t, say("PIN@global: always run the tests")); !strings.Contains(msg, "for every repo") {
+		t.Errorf("PIN@global outside git: %q", msg)
+	}
+	if msg := blockMsg(t, say("UNPIN: staging")); !strings.Contains(msg, "unpinned") {
 		t.Errorf("UNPIN outside git: %q", msg)
 	}
-	// With more lines, the rest is for the agent: say so, don't block.
-	if msg := sysMsg(t, say("PIN: x\nnow explain cart.py")); !strings.Contains(msg, "nothing saved") {
-		t.Errorf("PIN plus a question outside git: %q", msg)
+	// The help must not offer the two verbs that cannot work here.
+	help := blockMsg(t, say("LEDGER?"))
+	if strings.Contains(help, "PIN@branch:") || strings.Contains(help, "PROMOTE:") {
+		t.Errorf("folder help offers verbs that need a repo: %q", help)
 	}
-	if out := say("PINS?"); !strings.Contains(out, `"decision":"block"`) || !strings.Contains(out, "git repository") {
-		t.Errorf("PINS? outside git: %q", out)
+	if !strings.Contains(help, "every chat in this folder") {
+		t.Errorf("folder help does not explain PIN@repo: %q", help)
 	}
-	if out := say("hello"); out != "" {
-		t.Errorf("plain prompt outside git: %q", out)
+	// PROMOTE: writes into a work tree, so it is the one verb with nowhere to go.
+	if msg := blockMsg(t, say("PROMOTE: ask before pushing")); !strings.Contains(msg, "git repository") {
+		t.Errorf("PROMOTE outside git: %q", msg)
+	}
+}
+
+// Two folders are two ledgers, and a folder is never confused with a repo that
+// happens to share its name.
+func TestFolderLedgersStayApart(t *testing.T) {
+	e := setup(t)
+	a, b := t.TempDir(), t.TempDir()
+	rootA, errA := ledger.Root(a)
+	rootB, errB := ledger.Root(b)
+	if errA != nil || errB != nil || rootA == rootB {
+		t.Fatalf("two folders share a ledger: %q %q (%v %v)", rootA, rootB, errA, errB)
+	}
+	if !ledger.IsFolder(rootA) || ledger.IsFolder(e.root) {
+		t.Fatalf("folder and repo ledgers are not told apart: %q %q", rootA, e.root)
+	}
+	if again, _ := ledger.Root(a); again != rootA {
+		t.Fatalf("folder ledger is not stable: %q vs %q", rootA, again)
 	}
 }
 

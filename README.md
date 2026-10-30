@@ -45,7 +45,7 @@ codex plugin add agent-ledger@agent-ledger
 
 then start Codex and, at "Hooks need review", trust the agent-ledger hooks. Each update asks again.
 
-On first use the plugin downloads one binary (about 3 MB) from the GitHub release; your first prompt waits a few seconds for it. It works only inside a git repository. Requirements, checksums and failure handling are under [How the install works](#how-the-install-works).
+On first use the plugin downloads one binary (about 3 MB) from the GitHub release; your first prompt waits a few seconds for it. Requirements, checksums and failure handling are under [How the install works](#how-the-install-works).
 
 ## Using it
 
@@ -131,6 +131,10 @@ After `/clear`, Claude Code starts a new session id. Your `PIN!:` pins and `CARR
 
 Which repo you are in is decided the first time you pin: a file named `agent-ledger-id` is written inside that repo's `.git` directory and records which ledger folder is yours. Git never shows that file in `git status`, and `git clone` does not copy it, so a clone starts its own ledger. All worktrees of a repo share one, and a subdirectory uses the same ledger as the root. Because the ledger is named by that file rather than by where the repo sits, moving or renaming the repo keeps your pins.
 
+**A folder that is not a repository** gets a ledger too, which is what makes a general chat that spans several repos usable. `PIN:`, `PIN!:`, `CARRY:`, `PINS?`, `UNPIN:`, `PIN@repo:` and `PIN@global:` all work there; `PIN@repo:` is worded as "this folder" and covers every chat in it. Two verbs still need a repository and say so: `PIN@branch:`, because there is no branch, and `PROMOTE:`, because there is no work tree to write `CLAUDE.md` into.
+
+A folder is known by its path, since the only place to put a marker would be the folder itself, where it would be a file you did not ask for and git would offer to commit. So moving a folder starts a new ledger, which is the 0.1.x behaviour. Entering a repository inside that folder switches to the repository's own ledger: the general chat and the repo chats stay separate, and `PIN@global:` is what both see.
+
 Two things start a fresh, empty ledger: deleting `.git` and running `git init` again, since the marker goes with it, and coming from 0.1.x, which named the ledger after the repo's path. Nothing is deleted in either case; the old pins stay under the old folder name in `~/.local/state/agent-ledger/`. If `.git` is read-only the marker cannot be written and that repo falls back to being known by its path, which is the 0.1.x behaviour: pinning still works, but a move loses the pins. `agent-ledger status` prints the ledger folder in use, and the idle cleanup only looks at the repo you are in, so any folder left behind stays until you delete it.
 
 Without a hook session id (`status`, `preview`), the ledger comes from `CLAUDE_CODE_SESSION_ID`, `CLAUDE_SESSION_ID` or `CODEX_THREAD_ID`, else the current branch (`detached` on a detached HEAD). You get a warning when it falls back to the branch.
@@ -158,7 +162,7 @@ Invalid values are ignored and listed by `agent-ledger config`.
 
 ## How the install works
 
-On first use the plugin downloads one binary (about 3 MB) for your OS from the GitHub release into the plugin's data folder (`~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). Your first prompt waits up to a few seconds for the download. If it isn't done by then, you see "still installing": that prompt is not recorded, and a ledger command is blocked so you can send it again. If the download fails, you are told on each prompt, with the path of a marker file you can delete to retry at once; otherwise it retries after 5 minutes, then hourly. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere a `PIN:` tells you so).
+On first use the plugin downloads one binary (about 3 MB) for your OS from the GitHub release into the plugin's data folder (`~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). Your first prompt waits up to a few seconds for the download. If it isn't done by then, you see "still installing": that prompt is not recorded, and a ledger command is blocked so you can send it again. If the download fails, you are told on each prompt, with the path of a marker file you can delete to retry at once; otherwise it retries after 5 minutes, then hourly. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`.
 
 Your normal prompts are never blocked. Slash commands, `PIN:`, `PINS?`, `LEDGER?`, `CARRY:`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about new, removed or changed pins with your next prompt. In Claude Code the command stays in the input box after the reply; clear it (Ctrl+U) before typing on. If the download fails, the reason goes to `skips.log` in `~/.local/state/agent-ledger/` (or `$XDG_STATE_HOME/agent-ledger/`). If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 

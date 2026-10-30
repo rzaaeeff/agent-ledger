@@ -97,6 +97,41 @@ func repoName(common string) string {
 	return filepath.Base(filepath.Dir(common))
 }
 
+// FolderPrefix starts the ledger name of a folder that is not in a git
+// repository. Safe never produces "@", so a repo can never take such a name.
+const FolderPrefix = "@dir-"
+
+// IsFolder reports whether root is the ledger of a plain folder rather than of a
+// git repository. Branch pins and PROMOTE: have nothing to work with there.
+func IsFolder(root string) bool {
+	return strings.HasPrefix(filepath.Base(root), FolderPrefix)
+}
+
+// folderRoot is the ledger of a folder with no repository: the folder's own name
+// plus a hash of its path. There is no marker, because the only place to put one
+// is the folder itself, where it would be a file the user did not ask for and
+// git would offer to commit. Moving such a folder starts a new ledger.
+func folderRoot(cwd string) string {
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		abs = cwd
+	}
+	abs = filepath.Clean(abs)
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	key := abs
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		key = strings.ToLower(key)
+	}
+	sum := sha1.Sum([]byte(key))
+	name := Safe(filepath.Base(abs), 60, true)
+	if name == "" {
+		name = "folder"
+	}
+	return filepath.Join(StateHome(), FolderPrefix+name+"-"+hex.EncodeToString(sum[:])[:6])
+}
+
 // readMarker is the ledger name recorded for this repo, or "" if there is none.
 // Safe keeps a hand-edited or hostile marker to one directory inside the store.
 func readMarker(common string) string {
@@ -123,7 +158,7 @@ func Root(cwd string) (string, error) {
 				return "", fmt.Errorf("%w; git said: %s", ErrNoRepo, line)
 			}
 		}
-		return "", ErrNoRepo
+		return folderRoot(cwd), nil
 	}
 	common = filepath.Clean(common)
 	if real, err := filepath.EvalSymlinks(common); err == nil {
@@ -204,6 +239,11 @@ func DirFor(cfg Config, cwd, sid string) (string, error) {
 		if sid == "" {
 			sid = SessionFromEnv()
 		}
+	}
+	if sid == "" && IsFolder(root) {
+		// No branch to fall back to outside a repository, so all of the folder's
+		// sessionless chats share one ledger.
+		return filepath.Join(root, RepoKey), nil
 	}
 	if sid == "" {
 		b, _ := git(cwd, "branch", "--show-current")

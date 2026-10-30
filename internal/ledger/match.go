@@ -306,19 +306,25 @@ func pinsApply(n int) string {
 
 func fileExists(p string) bool { _, err := os.Lstat(p); return err == nil }
 
-// HelpText is what LEDGER? shows the user (never the model).
-func HelpText(status string) string {
+// HelpText is what LEDGER? shows the user (never the model). In a folder with no
+// repository it drops the two verbs that need one, rather than offering help that
+// only ends in a refusal.
+func HelpText(status string, folder bool) string {
+	scopes := "  PIN@branch: / PIN@repo: / PIN@global: <text>   every chat on the branch / in the repo / everywhere\n"
+	promote := "  PROMOTE: <ref>          move a pin into CLAUDE.md or AGENTS.md (uncommitted)\n"
+	if folder {
+		scopes = "  PIN@repo: / PIN@global: <text>   every chat in this folder / everywhere\n"
+		promote = ""
+	}
 	return `agent-ledger keeps the lines you mark and puts them back after compaction.
 Start a prompt with (any case; only at the start):
   PIN: <text>             keep in this chat (dropped on /clear)
   PIN!: <text>            keep in this chat, also across /clear
   CARRY: <text>           where you left off, for the next chat after
                           /clear; delivered once, then deleted (not a pin)
-  PIN@branch: / PIN@repo: / PIN@global: <text>   every chat on the branch / in the repo / everywhere
-  PIN [ref]: <new text>   reword a pin
+` + scopes + `  PIN [ref]: <new text>   reword a pin
   UNPIN: <ref>            remove a pin
-  PROMOTE: <ref>          move a pin into CLAUDE.md or AGENTS.md (uncommitted)
-  PINS?                   list pins          LEDGER?   this help
+` + promote + `  PINS?                   list pins          LEDGER?   this help
 <ref> is a number from PINS?, an id, "last", or words from the pin.
 Only you see PINS? and LEDGER?; the agent gets nothing.
 ` + status

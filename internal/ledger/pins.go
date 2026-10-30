@@ -48,8 +48,12 @@ func PinScopes(cwd, dir string) []Scope {
 	if b, _ := git(cwd, "branch", "--show-current"); b != "" {
 		out = append(out, Scope{ScopeBranch, "Pinned for branch " + b + " (all sessions)", filepath.Join(root, branchKey(b)), "branch " + b})
 	}
+	repoLabel, repoShort := "Pinned for this repo (all sessions and branches)", "this repo"
+	if IsFolder(root) {
+		repoLabel, repoShort = "Pinned for this folder (all sessions)", "this folder"
+	}
 	out = append(out,
-		Scope{ScopeRepo, "Pinned for this repo (all sessions and branches)", filepath.Join(root, RepoKey), "this repo"},
+		Scope{ScopeRepo, repoLabel, filepath.Join(root, RepoKey), repoShort},
 		Scope{ScopeGlobal, "Pinned for every repo", GlobalDir(), "every repo"})
 	kept := out[:0]
 	for _, s := range out {
