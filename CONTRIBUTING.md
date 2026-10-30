@@ -27,7 +27,9 @@ gh run watch
 
 Nothing can be released untested, though. Merging to `master` publishes whatever version `VERSION` names, and before it does, it looks for a successful `ci` run for that code, on the merge commit or on the pull request's head. If it finds none, it runs the full matrix itself and releases only if that passes. The Actions summary for the merge says which of the two happened, so a bypassed pull request is visible after the fact.
 
-So: bump `VERSION` in a pull request when the change should ship, and merging releases it. Leave `VERSION` alone and the merge publishes nothing.
+So: bump `VERSION` in a pull request when the change should ship, and merging releases it. Leave `VERSION` alone and the merge publishes nothing, which the summary says plainly.
+
+Bumping is deliberate and by hand. `VERSION` and `.claude-plugin/plugin.json` must agree, because the launcher downloads the binary for `VERSION` while the marketplace shows `plugin.json`; a mismatch sends a fresh install looking for a release that does not exist. `TestVersionFilesAgree` fails if they drift, so you cannot ship one without the other.
 
 `AGENT_LEDGER_BIN=/path/to/binary` makes an installed plugin use your build. `AGENT_LEDGER_DEBUG=1` logs every hook input to `hooks.debug.log` in the repo's ledger folder.
 

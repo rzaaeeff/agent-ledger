@@ -647,6 +647,30 @@ func TestVersionAndUsage(t *testing.T) {
 	}
 }
 
+// The shim downloads the binary for the version in VERSION, while the
+// marketplace shows the one in plugin.json. If they disagree, a fresh install
+// looks for a release that does not exist.
+func TestVersionFilesAgree(t *testing.T) {
+	root := filepath.Join("..", "..")
+	want, err := os.ReadFile(filepath.Join(root, "VERSION"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".claude-plugin", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(want)); m.Version != got {
+		t.Errorf("plugin.json says %q, VERSION says %q; bump both", m.Version, got)
+	}
+}
+
 func TestSameNamedReposStayApart(t *testing.T) {
 	e := setup(t)
 	other := filepath.Join(t.TempDir(), "proj")
