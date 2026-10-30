@@ -81,13 +81,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		warnFallback(stderr, dir)
 		cwd, _ := os.Getwd()
 		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-			fmt.Fprintf(stdout, "ledger: empty (%s)\n", dir)
+			fmt.Fprintln(stdout, "ledger: empty")
 		} else {
 			fmt.Fprintln(stdout, ledger.Status(dir))
 		}
 		if s := ledger.ScopeStatus(cwd, dir); s != "" {
 			fmt.Fprintln(stdout, s)
 		}
+		// Which folder, always: it is how you tell two ledgers apart, and the only
+		// way to see that a repo fell back to being known by its path.
+		fmt.Fprintln(stdout, "folder: "+dir)
 		return 0
 	case "config":
 		cwd, _ := os.Getwd()

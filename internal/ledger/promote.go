@@ -38,10 +38,24 @@ func PromoteTarget(cfg Config, cwd string) (string, error) {
 		return agents, nil
 	case aErr != nil:
 		return claude, nil
-	case importsAgents(claude), os.Getenv("CODEX_THREAD_ID") != "" && os.Getenv("CLAUDE_PROJECT_DIR") == "":
+	case importsAgents(claude), isCodex():
 		return agents, nil
 	}
 	return claude, nil
+}
+
+// isCodex reports whether Codex is the agent running us, which decides PROMOTE:'s
+// target when both files exist: Codex never reads CLAUDE.md. The launcher works it
+// out and exports AGENT_LEDGER_HOST, because Codex does not pass CODEX_THREAD_ID
+// to hook processes (0.146 does not), which this used to rely on.
+func isCodex() bool {
+	switch os.Getenv("AGENT_LEDGER_HOST") {
+	case "codex":
+		return true
+	case "claude":
+		return false
+	}
+	return os.Getenv("CODEX_THREAD_ID") != "" && os.Getenv("CLAUDE_PROJECT_DIR") == ""
 }
 
 // importsAgents reports whether CLAUDE.md links to AGENTS.md or imports it (@AGENTS.md).

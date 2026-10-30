@@ -1,6 +1,6 @@
 ---
 name: carry
-description: Hand a note to the next chat after /clear, once (agent-ledger).
+description: Hand a note to the next chat after /clear, once; Claude Code only, as Codex starts a chat it cannot link (agent-ledger).
 argument-hint: "[text]"
 disable-model-invocation: true
 ---

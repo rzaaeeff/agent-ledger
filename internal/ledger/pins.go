@@ -29,7 +29,7 @@ const (
 // produces "@", so no repo store can collide with it.
 const GlobalKey = "@global"
 
-// GlobalDir holds the pins shown in every repo.
+// GlobalDir holds the pins shown everywhere, in every repo and every folder.
 func GlobalDir() string { return filepath.Join(StateHome(), GlobalKey) }
 
 // Scope is one pin store besides the current ledger.
@@ -54,7 +54,8 @@ func PinScopes(cwd, dir string) []Scope {
 	}
 	out = append(out,
 		Scope{ScopeRepo, repoLabel, filepath.Join(root, RepoKey), repoShort},
-		Scope{ScopeGlobal, "Pinned for every repo", GlobalDir(), "every repo"})
+		// "everywhere", not "every repo": global pins apply in folders with no repo too.
+		Scope{ScopeGlobal, "Pinned everywhere", GlobalDir(), "everywhere"})
 	kept := out[:0]
 	for _, s := range out {
 		if filepath.Clean(s.Dir) != filepath.Clean(dir) {
@@ -232,9 +233,12 @@ func ScopeStatus(cwd, dir string) string {
 	total := 0
 	for _, s := range PinScopes(cwd, dir) {
 		name := s.Name
-		if s.Name == ScopeBranch {
+		switch {
+		case s.Name == ScopeBranch:
 			b, _ := git(cwd, "branch", "--show-current")
 			name += " " + b
+		case s.Name == ScopeRepo && IsFolder(filepath.Dir(dir)):
+			name = "folder"
 		}
 		n := len(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)))
 		total += n

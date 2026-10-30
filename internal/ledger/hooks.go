@@ -64,6 +64,16 @@ func emit(w io.Writer, msg string) {
 	fmt.Fprintf(w, "%s\n", Marshal(map[string]string{"systemMessage": msg}))
 }
 
+// tellAgent shows msg to the user and gives the model ctx. Used where the prompt
+// still reaches the model after nothing was stored: the refusal is a system
+// message the model never sees, so without ctx it confirms a pin that does not
+// exist ("Pinned: nonsense"). A blockWriter leaves this alone, so a lone command
+// is still blocked and the model gets no turn at all.
+func tellAgent(w io.Writer, msg, ctx string) {
+	fmt.Fprintf(w, "%s\n", Marshal(map[string]any{"systemMessage": msg,
+		"hookSpecificOutput": map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": ctx}}))
+}
+
 // PinNote is what the model gets with a stored PIN: without it, agents tend to
 // copy the rule into auto memory or AGENTS.md, where UNPIN and /clear can't reach it.
 const PinNote = "agent-ledger keeps the user's pins and puts them back after every compaction for as long as they stay pinned; the user removes them with UNPIN. Do not save pins to memory, CLAUDE.md, AGENTS.md or any other file."
@@ -115,7 +125,7 @@ func debug(root, event string, h HookInput) {
 //	CARRY: <text>      injected once, right after the next /clear (a handoff)
 //	PIN@branch: <text> for every session on this branch (refused on the default branch)
 //	PIN@repo: <text>   for every session and branch of this repo
-//	PIN@global: <text> for every repo
+//	PIN@global: <text> everywhere
 //	UNPIN: <ref>       removes the one pin ref selects, from any of those stores:
 //	                   an id, its number in PINS?, "last", or words in it in any
 //	                   order (case and punctuation ignored); else lists the closest
@@ -193,17 +203,17 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	switch q := strings.TrimSpace(h.Prompt); {
 	case strings.EqualFold(q, "PINS?"):
 		pins := listPins(h.Cwd, dir, here)
-		msg := PinsList(pins)
+		msg := PinsList(pins, codex)
 		if codex {
 			msg += CodexClearNote(pins)
 		}
 		block(out, msg)
 		return
 	case strings.EqualFold(q, "LEDGER?"):
-		block(out, HelpText(Status(dir), IsFolder(filepath.Dir(dir))))
+		block(out, HelpText(Status(dir), IsFolder(filepath.Dir(dir)), codex))
 		return
 	}
-	pinsHere := func() string { return brief(listPins(h.Cwd, dir, here)) }
+	pinsHere := func() string { return brief(listPins(h.Cwd, dir, here), codex) }
 	prompt, masked := h.Prompt, 0
 	if cfg.Redact == "on" {
 		prompt, masked = Redact(prompt)
@@ -213,7 +223,12 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if cfg.Logging == "all" || (cfg.Logging == "pins-only" && ok) {
 		if MkdirPrivate(dir) != nil {
 			if ok && cmd.text != "" {
-				emit(out, cmd.verb+" NOT SAVED: could not create "+dir+" (check permissions and disk space).")
+				msg := cmd.verb + " NOT SAVED: could not create " + dir + " (check permissions and disk space)."
+				w := out
+				if afterCmdLine(prompt) == "" {
+					w = blockWriter{out}
+				}
+				tellAgent(w, msg, "agent-ledger: the "+cmd.verb+" line in this prompt was NOT stored (the ledger folder could not be created). Do not tell the user it was saved.")
 			}
 			return
 		}
@@ -240,8 +255,14 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			v["systemMessage"] = msg
 		}
 		// UNPIN/PROMOTE/reword blocked their prompt, so the model learns of them now.
-		if n := takeNotices(dir); n != "" {
-			v["hookSpecificOutput"] = map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": n}
+		ctx := takeNotices(dir)
+		if hint := nearMiss(prompt); hint != "" {
+			// The near miss is shown to the user only. Say so, or the model reads the
+			// prompt as a command and confirms a pin that was never stored.
+			ctx = strings.TrimSpace(ctx + " agent-ledger: this prompt looks like a ledger command but is not one, so nothing was pinned. Treat it as an ordinary prompt and do not confirm a pin.")
+		}
+		if ctx != "" {
+			v["hookSpecificOutput"] = map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": ctx}
 		}
 		if len(v) > 0 {
 			fmt.Fprintf(out, "%s\n", Marshal(v))
@@ -281,7 +302,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		out = blockWriter{out}
 	}
 	if cmd.ref != "" {
-		rewordPin(h, dir, here, cmd, out)
+		rewordPin(h, dir, here, cmd, codex, out)
 		return
 	}
 	switch cmd.verb {
@@ -322,7 +343,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 				where = " for this folder"
 			}
 		case cmd.scope == ScopeGlobal:
-			target, where = GlobalDir(), " for every repo"
+			target, where = GlobalDir(), " everywhere"
 		}
 		scope := cmd.scope
 		if cmd.scope != "" && filepath.Clean(target) == filepath.Clean(dir) {
@@ -367,7 +388,8 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		}
 		if MkdirPrivate(target) != nil || Append(file, Marshal(Pin{id, Now().Format(time.RFC3339Nano), cmd.text, life})) != nil {
 			LogError(dir, "pinned append failed")
-			emit(out, cmd.verb+" NOT SAVED: could not write "+file+" (check permissions and disk space).")
+			tellAgent(out, cmd.verb+" NOT SAVED: could not write "+file+" (check permissions and disk space).",
+				"agent-ledger: the "+cmd.verb+" line in this prompt was NOT stored (the ledger could not be written). Do not tell the user it was saved.")
 			return
 		}
 		msg := fmt.Sprintf("pinned [%s]%s.", id, where)
@@ -381,7 +403,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			msg += " Not meant as a pin? UNPIN: last."
 		}
 		if n := pinBytes(listPins(h.Cwd, dir, here)); n > PinWarnBytes {
-			msg += fmt.Sprintf(" Warning: pins here now take %d of the %d bytes that come back after compaction; UNPIN the ones that no longer apply.", n, MaxBudget)
+			msg += fmt.Sprintf(" Warning: pins here now take %d of the %d bytes that come back after compaction; UNPIN the ones that no longer apply.", n, min(cfg.BudgetBytes, MaxBudget))
 		}
 		pinned(out, dir, msg+" "+pinsHere(), cmd.verb, pass, fmt.Sprintf("The user pinned [%s]%s: %q. It applies from now on.", id, where, cmd.text))
 	case "UNPIN", "PROMOTE":
@@ -412,6 +434,12 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		var added bool
 		if err == nil {
 			added, err = addRule(target, p.Text)
+		}
+		if errors.Is(err, ErrNoRepo) {
+			// Not an error: there is simply no work tree to write the file into. Say
+			// what to do instead, as every other refusal does, and do not log it.
+			block(out, "PROMOTE refused: this folder is not in a git repository, so there is no CLAUDE.md or AGENTS.md to write to. The pin is still here; PIN@repo: keeps it for every chat in this folder.")
+			return
 		}
 		if err != nil {
 			LogError(dir, "promote failed: "+err.Error())
@@ -448,20 +476,28 @@ func pickPin(verb, ref string, all []located) (located, string) {
 		return located{}, verb + " did nothing: there are no pins here."
 	}
 	msg := fmt.Sprintf("%s did nothing: no pin matches %q.", verb, ref)
-	if c := closest(ref, all, 3); len(hits) == 0 && len(c) > 0 {
-		msg += " Closest: " + refList(c) + "."
-	} else if len(hits) > 1 {
+	if len(hits) > 1 {
 		if len(hits) > 5 {
 			hits = hits[:5]
 		}
 		msg = fmt.Sprintf("%s did nothing: %q matches several pins: %s.", verb, ref, refList(hits))
+	} else if c := closest(ref, all, 3); len(c) > 0 {
+		msg += " Closest: " + refList(c) + "."
+	} else {
+		// Nothing shares enough words to be "closest". Name some pins anyway: a
+		// refusal with nothing to act on is why you have to send PINS? next.
+		some := all
+		if len(some) > 3 {
+			some = some[:3]
+		}
+		msg += " Pinned here: " + refList(some) + "."
 	}
 	return located{}, msg + fmt.Sprintf(" Send %s: <id>, or PINS? to list them.", verb)
 }
 
 // rewordPin handles PIN [ref]: <text>: the pin keeps its store and lifetime and
 // gets the id of its new text.
-func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
+func rewordPin(h HookInput, dir, here string, cmd pinCmd, codex bool, out io.Writer) {
 	if cmd.verb != "PIN" || cmd.keep || cmd.scope != "" {
 		block(out, "ledger: nothing saved. To reword a pin: PIN [id]: new text (it keeps its scope and lifetime).")
 		return
@@ -501,7 +537,7 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
 		block(out, fmt.Sprintf("PIN NOT SAVED: [%s] was removed meanwhile.", hit.ID))
 	default:
 		notice(dir, fmt.Sprintf("The user reworded pin [%s] %q; it is now [%s] %q.", hit.ID, hit.Text, p.ID, p.Text))
-		block(out, fmt.Sprintf("reworded [%s] -> [%s] (%s). %s", hit.ID, p.ID, hit.Where, brief(listPins(h.Cwd, dir, here))))
+		block(out, fmt.Sprintf("reworded [%s] -> [%s] (%s). %s", hit.ID, p.ID, hit.Where, brief(listPins(h.Cwd, dir, here), codex)))
 	}
 }
 

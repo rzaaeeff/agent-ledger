@@ -1,6 +1,6 @@
 {
   "name": "agent-ledger",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Type PIN: before a rule and it comes back word for word after every compaction. Local, no model calls. Claude Code and Codex.",
   "author": { "name": "Heydar Rzayev", "url": "https://github.com/rzaaeeff" },
   "repository": "https://github.com/rzaaeeff/agent-ledger"

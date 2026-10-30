@@ -13,12 +13,25 @@ fail() {
   if [ "${1-}" = hook ]; then
     state="${XDG_STATE_HOME:-${HOME:-}/.local/state}/agent-ledger"
     mkdir -p "$state" 2>/dev/null && chmod 700 "$state" 2>/dev/null
+    touch "$state/skips.log" 2>/dev/null && chmod 600 "$state/skips.log" 2>/dev/null
     printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$msg" >>"$state/skips.log" 2>/dev/null
     exit 0
   fi
   echo "agent-ledger: $msg" >&2
   exit 1
 }
+
+# Which agent is running us. Codex does not pass CODEX_THREAD_ID to hook processes
+# (0.146 does not), and PROMOTE: has to know, because Codex never reads CLAUDE.md.
+# The plugin root says it: Codex installs under its own plugins/cache.
+if [ -n "${CLAUDE_PLUGIN_ROOT-}${CLAUDE_PROJECT_DIR-}${CLAUDE_PLUGIN_DATA-}" ]; then
+  AGENT_LEDGER_HOST=claude
+elif [ -n "${CODEX_THREAD_ID-}${CODEX_HOME-}" ] || case "$root" in *"/.codex/"* | *"/codex/"*) true ;; *) false ;; esac then
+  AGENT_LEDGER_HOST=codex
+else
+  AGENT_LEDGER_HOST=""
+fi
+export AGENT_LEDGER_HOST
 
 if [ -n "${AGENT_LEDGER_BIN-}" ]; then
   exec "$AGENT_LEDGER_BIN" "$@"

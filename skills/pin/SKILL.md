@@ -1,6 +1,6 @@
 ---
 name: pin
-description: Pin a rule; agent-ledger puts it back word for word after every compaction. "/pin text", "/pin ! text" (kept across /clear), "/pin @branch|@repo|@global text"; /pin alone lists pins.
+description: Pin a rule; agent-ledger puts it back word for word after every compaction. "/pin text", "/pin ! text" (kept across /clear in Claude Code), "/pin @branch|@repo|@global text"; /pin alone lists pins.
 argument-hint: "[! | @branch | @repo | @global] [text]"
 disable-model-invocation: true
 ---

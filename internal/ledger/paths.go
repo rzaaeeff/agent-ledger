@@ -169,13 +169,21 @@ func Root(cwd string) (string, error) {
 	if name := readMarker(common); name != "" {
 		return filepath.Join(StateHome(), name), nil
 	}
-	name, err := newName(common)
-	if err == nil {
-		err = os.WriteFile(filepath.Join(common, MarkerFile), []byte(name+"\n"), 0o600)
+	// A repo whose .git was read-only has been pinning to its fallback ledger. It
+	// must keep those pins now that the marker can be written, so the marker adopts
+	// that ledger rather than minting a name nothing points at.
+	name := fallbackName(common)
+	if _, serr := os.Stat(filepath.Join(StateHome(), name)); serr != nil {
+		var nerr error
+		if name, nerr = newName(common); nerr != nil {
+			// No randomness. Identity must never be the reason a pin is refused, so
+			// use the name that needs nothing stored in the repo.
+			return filepath.Join(StateHome(), fallbackName(common)), nil
+		}
 	}
-	if err != nil {
-		// No randomness, or a read-only .git. Identity must never be the reason a
-		// pin is refused, so use the name that needs nothing written down.
+	if err := os.WriteFile(filepath.Join(common, MarkerFile), []byte(name+"\n"), 0o600); err != nil {
+		// A read-only .git. The fallback needs nothing written down, and is the same
+		// name the marker would have adopted, so the pins land in one place either way.
 		name = fallbackName(common)
 	}
 	return filepath.Join(StateHome(), name), nil

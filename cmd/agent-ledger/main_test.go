@@ -215,8 +215,13 @@ func TestLoggingAndPins(t *testing.T) {
 		t.Errorf("PIN message = %q", msg)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "s1")
-	if out, _, _ := cli(nil, "status"); out != "ledger: 1 pins (~5 tokens) | 3 prompts | 0 errors\n" {
+	if out, _, _ := cli(nil, "status"); !strings.HasPrefix(out, "ledger: 1 pin (~5 tokens) | 3 logged prompts | 0 errors\n") {
 		t.Errorf("status = %q", out)
+	}
+	// status names the ledger folder, which is how two ledgers are told apart and
+	// the only sign that a repo fell back to being known by its path.
+	if out, _, _ := cli(nil, "status"); !strings.Contains(out, "\nfolder: "+e.root) {
+		t.Errorf("status does not name the ledger folder: %q", out)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	e.say("PIN:   keep the critique format  ", "s1")
@@ -264,19 +269,19 @@ func TestKeyedBySession(t *testing.T) {
 		t.Errorf("other session must see only its own pins:\n%s", out)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "s2")
-	want := "ledger: 1 pins (~3 tokens) | 1 prompts | 0 errors\n"
-	if out, _, _ := cli(nil, "status"); out != want {
+	want := "ledger: 1 pin (~3 tokens) | 1 logged prompt | 0 errors\n"
+	if out, _, _ := cli(nil, "status"); !strings.HasPrefix(out, want) {
 		t.Errorf("CLAUDE_CODE_SESSION_ID=s2 status = %q", out)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "s2")
 	t.Setenv("CLAUDE_SESSION_ID", "s1")
-	if out, _, _ := cli(nil, "status"); out != want {
+	if out, _, _ := cli(nil, "status"); !strings.HasPrefix(out, want) {
 		t.Errorf("CLAUDE_CODE_SESSION_ID (Claude Code's own) must win over CLAUDE_SESSION_ID from CLAUDE_ENV_FILE: %q", out)
 	}
 	t.Setenv("CLAUDE_SESSION_ID", "")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	t.Setenv("CODEX_THREAD_ID", "s2")
-	if out, _, _ := cli(nil, "status"); out != want {
+	if out, _, _ := cli(nil, "status"); !strings.HasPrefix(out, want) {
 		t.Errorf("CODEX_THREAD_ID=s2 status = %q", out)
 	}
 	t.Setenv("CODEX_THREAD_ID", "")
@@ -318,7 +323,7 @@ func TestKeyedBySession(t *testing.T) {
 	t.Setenv("CLAUDE_SESSION_ID", strings.TrimPrefix(ls[len(ls)-1], "export CLAUDE_SESSION_ID="))
 	st, _, _ := cli(nil, "status")
 	t.Setenv("CLAUDE_SESSION_ID", "")
-	if !strings.HasPrefix(st, "ledger: 1 pins") {
+	if !strings.HasPrefix(st, "ledger: 1 pin ") {
 		t.Errorf("status via the exported id does not see the hooks' ledger: %q", st)
 	}
 }
@@ -332,7 +337,7 @@ func TestBranchFallback(t *testing.T) {
 		t.Error("no session id: branch ledger not used / not sanitised")
 	}
 	out, errs, rc := cli(nil, "status")
-	if rc != 0 || !strings.Contains(errs, "no session id") || !strings.Contains(out, "| 1 prompts") {
+	if rc != 0 || !strings.Contains(errs, "no session id") || !strings.Contains(out, "| 1 logged prompt |") {
 		t.Errorf("status fallback: rc=%d out=%q err=%q", rc, out, errs)
 	}
 	e.checkout("--detach")
@@ -344,7 +349,7 @@ func TestBranchFallback(t *testing.T) {
 	t.Chdir(t.TempDir())
 	// Outside a repo there is no branch to fall back to, so one ledger serves the
 	// folder's sessionless chats.
-	if out, _, _ := cli(nil, "status"); !strings.Contains(out, string(filepath.Separator)+"@dir-") || !strings.HasSuffix(strings.TrimSpace(out), ledger.RepoKey+")") {
+	if out, _, _ := cli(nil, "status"); !strings.Contains(out, string(filepath.Separator)+"@dir-") || !strings.HasSuffix(strings.TrimSpace(out), string(filepath.Separator)+ledger.RepoKey) {
 		t.Errorf("status outside a repo = %q", out)
 	}
 	if out, _, rc := cli(nil, "inject"); out != "" || rc != 0 {
@@ -788,6 +793,71 @@ func TestUnwritableRepoStillPins(t *testing.T) {
 	if out := e.say("PIN: still works read only", "s1"); !strings.Contains(out, "pinned") {
 		t.Fatalf("a read-only git dir blocked a pin: %q", out)
 	}
+}
+
+// A repo whose .git is read-only pins to a fallback ledger. When the permissions
+// come back, the marker must adopt that ledger: minting a fresh name instead left
+// the pins made meanwhile in a folder nothing pointed at, and the chat lost them
+// mid-session with no word that anything had happened.
+func TestRegainingWriteAccessKeepsPins(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	e := setup(t)
+	gitDir := filepath.Join(e.repo, ".git")
+	if err := os.Remove(filepath.Join(gitDir, ledger.MarkerFile)); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(gitDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(gitDir, info.Mode()) })
+	if out := e.say("PIN: written while read only", "s1"); !strings.Contains(out, "pinned") {
+		t.Fatalf("a read-only git dir blocked a pin: %q", out)
+	}
+	readOnly, err := ledger.Root(e.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitDir, info.Mode()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := ledger.Root(e.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != readOnly {
+		t.Fatalf("ledger moved when .git became writable: %q -> %q", readOnly, after)
+	}
+	out, _, _ := cli(m{"prompt": "PINS?", "cwd": e.repo, "session_id": "s1"}, "hook", "user-prompt-submit")
+	if !strings.Contains(out, "written while read only") {
+		t.Fatalf("pins lost once .git became writable: %q", out)
+	}
+	marker, err := os.ReadFile(filepath.Join(gitDir, ledger.MarkerFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(marker)); got != filepath.Base(after) {
+		t.Fatalf("marker %q does not name the ledger in use %q", got, filepath.Base(after))
+	}
+}
+
+// Nothing was saved, but the prompt still reaches the model. Without a word to the
+// model it confirms a pin that does not exist ("Pinned: nonsense").
+func TestNearMissTellsTheAgentNothingWasSaved(t *testing.T) {
+	e := setup(t)
+	out, _, _ := cli(m{"prompt": "PIN nonsense\nand please answer", "cwd": e.repo, "session_id": "s1"}, "hook", "user-prompt-submit")
+	if !strings.Contains(out, "nothing saved") {
+		t.Fatalf("near miss not reported to the user: %q", out)
+	}
+	if !strings.Contains(out, "additionalContext") || !strings.Contains(out, "do not confirm a pin") {
+		t.Fatalf("the agent was not told nothing was pinned: %q", out)
+	}
+	_ = e
 }
 
 func writeFile(t *testing.T, path, body string) {
@@ -1261,7 +1331,7 @@ func TestPromote(t *testing.T) {
 	writeFile(t, filepath.Join(e.repo, "CLAUDE.md"), "# Rules\n\n- be brief\n")
 	e.say("PIN: run the tests first", "s1")
 	msg := blockMsg(t, e.say("PROMOTE: run the tests", "s1"))
-	if !strings.Contains(msg, "promoted") || !strings.Contains(msg, "CLAUDE.md") || !strings.Contains(msg, "0 pins") {
+	if !strings.Contains(msg, "promoted") || !strings.Contains(msg, "CLAUDE.md") || !strings.Contains(msg, "0 pins apply here") {
 		t.Errorf("promote: %q", msg)
 	}
 	if got := read(filepath.Join(e.repo, "CLAUDE.md")); got != "# Rules\n\n- be brief\n\n## Project rules\n\n- run the tests first\n" {
@@ -1561,7 +1631,7 @@ func TestPinUX(t *testing.T) {
 		t.Errorf("pins? lower case")
 	}
 	help := block(e.say(" Ledger? ", "s1"))
-	for _, want := range []string{"PIN [ref]: <new text>", "UNPIN: <ref>", "PINS?", "ledger: 1 pins"} {
+	for _, want := range []string{"PIN [ref]: <new text>", "UNPIN: <ref>", "PINS?", "ledger: 1 pin "} {
 		if !strings.Contains(help, want) {
 			t.Errorf("LEDGER? lacks %q:\n%s", want, help)
 		}
@@ -1763,7 +1833,7 @@ func TestOutsideGitRepo(t *testing.T) {
 	if msg := blockMsg(t, say("PIN@branch: x")); !strings.Contains(msg, "not in a git repository") || !strings.Contains(msg, "PIN@repo:") {
 		t.Errorf("PIN@branch outside git: %q", msg)
 	}
-	if msg := blockMsg(t, say("PIN@global: always run the tests")); !strings.Contains(msg, "for every repo") {
+	if msg := blockMsg(t, say("PIN@global: always run the tests")); !strings.Contains(msg, "everywhere") {
 		t.Errorf("PIN@global outside git: %q", msg)
 	}
 	if msg := blockMsg(t, say("UNPIN: staging")); !strings.Contains(msg, "unpinned") {

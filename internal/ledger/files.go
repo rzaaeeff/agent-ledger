@@ -159,10 +159,18 @@ func Status(dir string) string {
 	for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
 		chars += len(p.Text) + 1
 	}
-	return fmt.Sprintf("ledger: %d pins (~%d tokens) | %d prompts | %d errors",
-		countLines(filepath.Join(dir, PinnedFile)), chars/4,
-		countLines(filepath.Join(dir, PromptsFile)),
-		countLines(filepath.Join(dir, ErrorsFile)))
+	return fmt.Sprintf("ledger: %s (~%d tokens) | %s | %s",
+		plural(countLines(filepath.Join(dir, PinnedFile)), "pin"), chars/4,
+		plural(countLines(filepath.Join(dir, PromptsFile)), "logged prompt"),
+		plural(countLines(filepath.Join(dir, ErrorsFile)), "error"))
+}
+
+// plural is "1 pin", "2 pins".
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
 }
 
 // Unpin removes pin p (same id and lifetime: older ledgers can hold a PIN and a
