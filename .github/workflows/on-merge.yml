@@ -6,6 +6,8 @@ name: on merge
 on:
   push:
     branches: [master]
+  # To retry a release that failed, without an empty commit.
+  workflow_dispatch:
 permissions: {}
 jobs:
   gate:
@@ -62,6 +64,15 @@ jobs:
   test:
     needs: gate
     if: needs.gate.outputs.release == 'true' && needs.gate.outputs.tested != 'true'
+    # A called workflow may lower what the caller granted, never raise it, and
+    # this file grants nothing by default, so ci.yml's contents: read must be
+    # handed to it here.
+    permissions:
+      contents: read
+      # ci.yml's report job asks for this. A called workflow cannot raise what
+      # it is given, so withholding it would stop the run before it starts,
+      # even though that job is skipped outside a dispatch.
+      statuses: write
     uses: ./.github/workflows/ci.yml
 
   release:
