@@ -136,6 +136,14 @@ func debug(root, event string, h HookInput) {
 //
 // Plain stdout would reach the model, so it prints only a systemMessage JSON (shown
 // to the user) after PIN:/UNPIN:. Problems go to errors.log.
+// afterCmdLine returns what follows a ledger command's line, if anything. It
+// skips the same leading blank space parsePin does, so a prompt that starts
+// with a newline still counts as command-only.
+func afterCmdLine(prompt string) string {
+	_, rest, _ := strings.Cut(strings.TrimLeft(prompt, " \t\r\n"), "\n")
+	return strings.TrimSpace(rest)
+}
+
 func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if h.Prompt == "" || h.bad {
 		return
@@ -162,9 +170,17 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		} else if errors.Is(err, ErrNoRepo) {
 			why = "git could not open this folder as a repository, so nothing is stored here. " + strings.TrimPrefix(err.Error(), ErrNoRepo.Error()+"; ")
 		}
-		if q := strings.TrimSpace(h.Prompt); strings.EqualFold(q, "PINS?") || strings.EqualFold(q, "LEDGER?") {
+		q := strings.TrimSpace(h.Prompt)
+		_, isPin := parsePin(h.Prompt)
+		rest := afterCmdLine(h.Prompt)
+		switch {
+		case strings.EqualFold(q, "PINS?"), strings.EqualFold(q, "LEDGER?"):
 			block(out, why)
-		} else if _, ok := parsePin(h.Prompt); ok {
+		case isPin && rest == "":
+			// The command is the whole prompt: block it, as a working ledger
+			// would, so the agent is never asked to act on "PIN: ...".
+			block(out, "ledger: nothing saved: "+why)
+		case isPin:
 			emit(out, "ledger: nothing saved: "+why)
 		}
 		return
@@ -232,6 +248,11 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		}
 		return
 	}
+	// A command that is the whole prompt never reaches the model, even when it
+	// fails: otherwise the agent is handed "PIN: ..." and tries to act on it.
+	if afterCmdLine(prompt) == "" {
+		out = blockWriter{out}
+	}
 	if cmd.scope != "" && cmd.scope != ScopeBranch && cmd.scope != ScopeRepo && cmd.scope != ScopeGlobal {
 		emit(out, fmt.Sprintf("ledger: nothing saved: there is no @%s. Use @branch, @repo or @global.", cmd.scope))
 		return
@@ -247,7 +268,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	out = &suffixWriter{w: out, suffix: note}
 	carry := cmd.verb == "CARRY" && cmd.ref == ""
 	pass := false
-	if _, rest, _ := strings.Cut(prompt, "\n"); strings.TrimSpace(rest) != "" {
+	if afterCmdLine(prompt) != "" {
 		// More than the command line: don't block, the rest is meant for the agent.
 		p := passWriter{w: out}
 		if carry {

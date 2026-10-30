@@ -1,6 +1,6 @@
 # agent-ledger
 
-[![Release](https://img.shields.io/github/v/release/rzaaeeff/agent-ledger)](https://github.com/rzaaeeff/agent-ledger/releases/latest) [![CI](https://github.com/rzaaeeff/agent-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/rzaaeeff/agent-ledger/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/rzaaeeff/agent-ledger)](https://github.com/rzaaeeff/agent-ledger/releases/latest) [![CI](https://img.shields.io/github/actions/workflow/status/rzaaeeff/agent-ledger/on-merge.yml?branch=master&label=CI)](https://github.com/rzaaeeff/agent-ledger/actions/workflows/on-merge.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 When Claude Code compacts a conversation, your earlier instructions survive only as well as the model-written summary keeps them. In a short session that is often word for word. Over a long one, a rule can come back reworded or not at all ([#94564](https://github.com/anthropics/claude-code/issues/94564), [#104779](https://github.com/anthropics/claude-code/issues/104779)).
 
@@ -65,6 +65,12 @@ Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 | `UNPIN: <ref>` | removes a pin | |
 | `PROMOTE: <ref>` | moves a pin into `CLAUDE.md` or `AGENTS.md` (see `promote_to`), uncommitted | |
 
+`PIN!:` and `CARRY:` are easy to mix up. A pin is a rule, so it is put back after every compaction until you `UNPIN` it. `CARRY:` is a note about where you left off, delivered once into the next chat and then deleted, which is why `PINS?` never lists it. Pinning "the auth refactor is half done" would still be telling the model that next week, long after it stopped being true.
+
+```
+CARRY: login.py is migrated, signup.py is not. I changed the session table by hand, leave it.
+```
+
 In Claude Code each one is also a slash command: `/pin <text>`, `/pin ! <text>`, `/pin @repo <text>`, `/pins`, `/unpin <ref>`, `/carry <text>`, `/promote <ref>` and `/agent-ledger:help` (type `/agent-ledger:` to see them all; if another skill is already called `/pin`, use `/agent-ledger:pin`). `/pin` alone lists your pins. In Codex the same names work as `$pin`, `$pins`, `$agent-ledger:help` and so on. A slash or `$` command never reaches the model and takes one line; to pin and ask in one message, use the prefix.
 
 A `<ref>` is a number from `PINS?`, a pin's id, `last`, or words from the pin. Prefixes work in any case (`pin:` = `PIN:`) but only at the start of the prompt; "pin:" in the middle of a sentence is ignored. A command is the first line only: the rest of the prompt goes to the agent as usual. Near misses like `PIN; x` or `PIN x` save nothing and tell you so (the prompt still goes to the agent). A lower-case `pin:` saves and offers `UNPIN: last` in case you didn't mean it.
@@ -123,6 +129,8 @@ By default each chat has its own ledger, keyed by the session id Claude Code or 
 
 After `/clear`, Claude Code starts a new session id. Your `PIN!:` pins and `CARRY:` items move to it only if exactly one chat in the same folder was cleared in the last 10 minutes. If several were, or the end-of-chat hook didn't run, nothing moves and you are told. A forked chat starts its own ledger (it sees branch, repo and global pins, not the original chat's).
 
+Which repo you are in is decided by the path of its `.git` directory, so two checkouts with the same name stay apart and a subdirectory uses the same ledger as the root. That path also names the ledger folder, so moving or renaming a repo starts an empty one. Nothing warns you: you just see "No pins here". The old pins are not lost, they sit under the old folder name in `~/.local/state/agent-ledger/` (`agent-ledger status` prints the path of the ledger in use, which shows you the naming). The idle cleanup only ever looks at the repo you are in, so that folder stays until you delete it: copy anything you still want, or pin it again.
+
 Without a hook session id (`status`, `preview`), the ledger comes from `CLAUDE_CODE_SESSION_ID`, `CLAUDE_SESSION_ID` or `CODEX_THREAD_ID`, else the current branch (`detached` on a detached HEAD). You get a warning when it falls back to the branch.
 
 ## Configuration
@@ -151,6 +159,15 @@ Invalid values are ignored and listed by `agent-ledger config`.
 On first use the plugin downloads one binary (about 3 MB) for your OS from the GitHub release into the plugin's data folder (`~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). Your first prompt waits up to a few seconds for the download. If it isn't done by then, you see "still installing": that prompt is not recorded, and a ledger command is blocked so you can send it again. If the download fails, you are told on each prompt, with the path of a marker file you can delete to retry at once; otherwise it retries after 5 minutes, then hourly. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`, and only works inside a git repository (elsewhere a `PIN:` tells you so).
 
 Your normal prompts are never blocked. Slash commands, `PIN:`, `PINS?`, `LEDGER?`, `CARRY:`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about new, removed or changed pins with your next prompt. In Claude Code the command stays in the input box after the reply; clear it (Ctrl+U) before typing on. If the download fails, the reason goes to `skips.log` in `~/.local/state/agent-ledger/` (or `$XDG_STATE_HOME/agent-ledger/`). If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
+
+To update:
+
+```
+claude plugin marketplace update agent-ledger
+claude plugin update agent-ledger
+```
+
+then restart Claude Code. The new binary is fetched on your next prompt, because each version keeps its own copy, so there is nothing else to run. Your pins are untouched by an update. In Codex, run `codex plugin marketplace update agent-ledger` and then the `codex plugin add` line again; it asks you to trust the hooks again.
 
 ## Cost
 

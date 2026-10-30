@@ -647,6 +647,30 @@ func TestVersionAndUsage(t *testing.T) {
 	}
 }
 
+// The shim downloads the binary for the version in VERSION, while the
+// marketplace shows the one in plugin.json. If they disagree, a fresh install
+// looks for a release that does not exist.
+func TestVersionFilesAgree(t *testing.T) {
+	root := filepath.Join("..", "..")
+	want, err := os.ReadFile(filepath.Join(root, "VERSION"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".claude-plugin", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(want)); m.Version != got {
+		t.Errorf("plugin.json says %q, VERSION says %q; bump both", m.Version, got)
+	}
+}
+
 func TestSameNamedReposStayApart(t *testing.T) {
 	e := setup(t)
 	other := filepath.Join(t.TempDir(), "proj")
@@ -1380,10 +1404,15 @@ func TestForgivingPinsReviewFixes(t *testing.T) {
 		t.Errorf("out-of-range number removed a pin: %d left", n)
 	}
 
-	// Leading spaces before a command are fine; prose mentioning pin: is not a command.
-	if msg := sysMsg(t, e.say("  \n PIN: indented rule", "s1")); !strings.Contains(msg, "pinned [") {
+	// Leading spaces and blank lines before a command are fine, and the command
+	// is still the whole prompt, so it never reaches the agent.
+	if msg := blockMsg(t, e.say("  \n PIN: indented rule", "s1")); !strings.Contains(msg, "pinned [") {
 		t.Errorf("indented PIN: %q", msg)
 	}
+	if msg := sysMsg(t, e.say("\nPIN: another rule\nnow explain cart.py", "s1")); !strings.Contains(msg, "pinned [") {
+		t.Errorf("blank line then a command and a question: %q", msg)
+	}
+	// prose mentioning pin: is not a command.
 	if out := e.say("this prompt mentions pin: and PIN: in passing", "s1"); strings.Contains(out, "systemMessage") || strings.Contains(out, `"decision"`) {
 		t.Errorf("prose treated as a command: %q", out)
 	}
@@ -1448,11 +1477,16 @@ func TestPinUX(t *testing.T) {
 			t.Errorf("prose %q got %q", p, out)
 		}
 	}
-	if msg := sysMsg(t, e.say("PIN@brnch: x", "s1")); !strings.Contains(msg, "no @brnch") {
+	// A failed command that is the whole prompt is still kept from the model.
+	if msg := blockMsg(t, e.say("PIN@brnch: x", "s1")); !strings.Contains(msg, "no @brnch") {
 		t.Errorf("unknown scope: %q", msg)
 	}
-	if msg := sysMsg(t, e.say("PIN:   ", "s1")); !strings.Contains(msg, "needs text") {
+	if msg := blockMsg(t, e.say("PIN:   ", "s1")); !strings.Contains(msg, "needs text") {
 		t.Errorf("empty PIN: %q", msg)
+	}
+	// With more lines the rest is for the agent, so a failure must not block it.
+	if msg := sysMsg(t, e.say("PIN@brnch: x\nwhat does cart.py do?", "s1")); !strings.Contains(msg, "no @brnch") {
+		t.Errorf("unknown scope plus a question: %q", msg)
 	}
 	if n := len(pinTexts(t, f)); n != 0 {
 		t.Errorf("look-alikes saved %d pins", n)
@@ -1609,8 +1643,16 @@ func TestOutsideGitRepo(t *testing.T) {
 		out, _, _ := cli(map[string]string{"prompt": p, "cwd": d, "session_id": "s1"}, "hook", "user-prompt-submit")
 		return out
 	}
-	if msg := sysMsg(t, say("PIN: x")); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git repository") {
+	// A command alone must be blocked, or the agent is handed "PIN: x" to act on.
+	if msg := blockMsg(t, say("PIN: x")); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git repository") {
 		t.Errorf("PIN outside git: %q", msg)
+	}
+	if msg := blockMsg(t, say("UNPIN: x")); !strings.Contains(msg, "git repository") {
+		t.Errorf("UNPIN outside git: %q", msg)
+	}
+	// With more lines, the rest is for the agent: say so, don't block.
+	if msg := sysMsg(t, say("PIN: x\nnow explain cart.py")); !strings.Contains(msg, "nothing saved") {
+		t.Errorf("PIN plus a question outside git: %q", msg)
 	}
 	if out := say("PINS?"); !strings.Contains(out, `"decision":"block"`) || !strings.Contains(out, "git repository") {
 		t.Errorf("PINS? outside git: %q", out)
@@ -1657,7 +1699,7 @@ func TestGitRefusesRepo(t *testing.T) {
 	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
 	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
 	out, _, _ := cli(m{"prompt": "PIN: x", "cwd": bare, "session_id": "s1"}, "hook", "user-prompt-submit")
-	if msg := sysMsg(t, out); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git said") {
+	if msg := blockMsg(t, out); !strings.Contains(msg, "nothing saved") || !strings.Contains(msg, "git said") {
 		t.Errorf("git refusal: %q", msg)
 	}
 }

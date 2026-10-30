@@ -1,8 +1,9 @@
 name: ci
 on:
-  push:
-    branches: [master]
-  pull_request:
+  # No run per commit. Start one with `gh workflow run ci.yml --ref <branch>`;
+  # on-merge.yml runs these same tests before it releases anything.
+  workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:

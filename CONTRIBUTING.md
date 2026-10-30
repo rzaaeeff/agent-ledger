@@ -18,6 +18,21 @@ The behaviour is specified by `cmd/agent-ledger/main_test.go`, which feeds the h
 
 CI runs the tests on Linux, macOS and Windows. File locking and renames behave differently on Windows, so changes to `internal/ledger/files.go` or the lock files deserve extra care.
 
+It does not run on every push. Start it when you want it:
+
+```
+gh workflow run ci.yml --ref <your branch>
+gh run watch
+```
+
+Or the Actions tab: pick `ci` on the left, then "Run workflow". GitHub reads that button from the default branch, so a branch that removes `workflow_dispatch` still shows it and still fails.
+
+Nothing can be released untested, though. Merging to `master` publishes whatever version `VERSION` names, and before it does, it looks for a successful `ci` run for that code, on the merge commit or on the pull request's head. If it finds none, it runs the full matrix itself and releases only if that passes. The Actions summary for the merge says which of the two happened, so a bypassed pull request is visible after the fact.
+
+So: bump `VERSION` in a pull request when the change should ship, and merging releases it. Leave `VERSION` alone and the merge publishes nothing, which the summary says plainly.
+
+Bumping is deliberate and by hand. `VERSION` and `.claude-plugin/plugin.json` must agree, because the launcher downloads the binary for `VERSION` while the marketplace shows `plugin.json`; a mismatch sends a fresh install looking for a release that does not exist. `TestVersionFilesAgree` fails if they drift, so you cannot ship one without the other.
+
 `AGENT_LEDGER_BIN=/path/to/binary` makes an installed plugin use your build. `AGENT_LEDGER_DEBUG=1` logs every hook input to `hooks.debug.log` in the repo's ledger folder.
 
 ## Docs
