@@ -140,9 +140,10 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if h.Prompt == "" || h.bad {
 		return
 	}
-	// Slash commands are handled by UserPromptExpansion, keyed on the command's
-	// real name; matching "/pin" here would hijack a user's own /pin skill.
-	if strings.HasPrefix(strings.TrimLeft(h.Prompt, " \t\r\n"), "/") {
+	// Our slash commands are handled by UserPromptExpansion, keyed on the
+	// command's real name (acting on "/pin" here would hijack a user's own /pin
+	// skill), and blocked there: pending notices must wait for the next prompt.
+	if ownSlashRe.MatchString(strings.TrimLeft(h.Prompt, " \t\r\n")) {
 		return
 	}
 	_, codex := h.raw["turn_id"]

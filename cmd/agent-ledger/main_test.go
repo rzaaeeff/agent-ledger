@@ -1855,8 +1855,20 @@ func TestSlashCommands(t *testing.T) {
 			t.Errorf("%v must be ignored: %q", c, out)
 		}
 	}
+	// A bad scope must not drain the model's pending notices.
+	e.say("PIN: drained?", "s1")
+	if r := upe(slash("agent-ledger:pin", "@my-repo x", "plugin")); !strings.Contains(r, "nothing saved") {
+		t.Errorf("/pin @bad-scope: %q", r)
+	}
+	if out := e.say("/review this", "s1"); !strings.Contains(out, "drained?") {
+		t.Errorf("another slash command must still get the pending notices: %q", out)
+	}
+	e.say("PIN: still pending", "s1")
 	if out := e.say("/pin from submit", "s1"); out != "" || strings.Contains(strings.Join(pinTexts(t, pins), ","), "from submit") {
 		t.Errorf("UserPromptSubmit must ignore /pin: %q", out)
+	}
+	if out := e.say("hello", "s1"); !strings.Contains(out, "still pending") {
+		t.Errorf("/pin must leave notices for the next prompt: %q", out)
 	}
 
 	// Codex: $pin and $agent-ledger:pin at the start of a prompt.

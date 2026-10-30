@@ -70,6 +70,12 @@ func (s slashOut) block(msg string) {
 }
 
 func (s slashOut) run(h HookInput, prompt string) {
+	// Only a valid command may reach the handler: anything else would drain the
+	// model's pending notices into a prompt that is blocked anyway.
+	if !isCommand(prompt) {
+		s.block("ledger: nothing saved: a scope is @branch, @repo or @global, followed by a space and the text.")
+		return
+	}
 	h.Prompt = prompt
 	var buf bytes.Buffer
 	HookUserPromptSubmit(h, &buf)
@@ -117,6 +123,9 @@ func HookUserPromptExpansion(h HookInput, out io.Writer) {
 	}
 	s.run(h, prompt)
 }
+
+// ownSlashRe matches this plugin's slash commands as typed (bare or namespaced).
+var ownSlashRe = regexp.MustCompile(`(?i)^/(agent-ledger:)?(pin|pins|unpin|carry|promote|help)(?:\s|$)`)
 
 var dollarRe = regexp.MustCompile(`(?i)^\$(agent-ledger:)?(pin|pins|unpin|carry|promote|help)(?:[ \t]+|$|\r?\n)`)
 
