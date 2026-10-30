@@ -686,6 +686,114 @@ func TestSameNamedReposStayApart(t *testing.T) {
 	}
 }
 
+// Moving or renaming a repo used to strand its pins: the ledger name was derived
+// from the repo's path, so the new path meant a new, empty ledger.
+func TestLedgerFollowsRepoMove(t *testing.T) {
+	e := setup(t)
+	if out := e.say("PIN: keep the schema in sync", "s1"); !strings.Contains(out, "pinned") {
+		t.Fatalf("pin not saved: %q", out)
+	}
+	moved := filepath.Join(t.TempDir(), "renamed")
+	if err := os.Rename(e.repo, moved); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(moved)
+	out, _, _ := cli(m{"prompt": "PINS?", "cwd": moved, "session_id": "s1"}, "hook", "user-prompt-submit")
+	if !strings.Contains(out, "keep the schema in sync") {
+		t.Fatalf("pins lost after the repo moved: %q", out)
+	}
+	root, err := ledger.Root(moved)
+	if err != nil || root != e.root {
+		t.Fatalf("moved repo got ledger %q, want %q (%v)", root, e.root, err)
+	}
+}
+
+// A ledger written before markers existed has no marker. It must be adopted where
+// it is, not abandoned, and the marker written so the next move is safe.
+func TestAdoptsLedgerFromOlderVersion(t *testing.T) {
+	e := setup(t)
+	marker := filepath.Join(e.repo, ".git", ledger.MarkerFile)
+	owner := filepath.Join(e.root, ledger.OwnerFile)
+	for _, f := range []string{marker, owner} {
+		if err := os.Remove(f); err != nil {
+			t.Fatalf("expected %s to exist: %v", filepath.Base(f), err)
+		}
+	}
+	root, err := ledger.Root(e.repo)
+	if err != nil || root != e.root {
+		t.Fatalf("old ledger not adopted: got %q want %q (%v)", root, e.root, err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(got)) != filepath.Base(e.root) {
+		t.Fatalf("marker not written on adoption: %q (%v)", got, err)
+	}
+}
+
+// A new repo created at a moved repo's old path computes the same path-derived
+// name. It must not inherit the other repo's pins.
+func TestNewRepoDoesNotInheritOldPath(t *testing.T) {
+	e := setup(t)
+	if out := e.say("PIN: secret from the first repo", "s1"); !strings.Contains(out, "pinned") {
+		t.Fatalf("pin not saved: %q", out)
+	}
+	moved := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Rename(e.repo, moved); err != nil {
+		t.Fatal(err)
+	}
+	e.git("init", "-q", "-b", "main", e.repo)
+	fresh, err := ledger.Root(e.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh == e.root {
+		t.Fatalf("a new repo at the old path adopted the moved repo's ledger %q", fresh)
+	}
+	out, _, _ := cli(m{"prompt": "PINS?", "cwd": e.repo, "session_id": "s1"}, "hook", "user-prompt-submit")
+	if strings.Contains(out, "secret from the first repo") {
+		t.Fatalf("new repo sees the other repo's pins: %q", out)
+	}
+}
+
+// The marker is a file in the repo, so a repo can carry a hostile one. It must
+// never point the ledger outside the store.
+func TestMarkerCannotEscapeTheStore(t *testing.T) {
+	e := setup(t)
+	store := filepath.Join(e.state, "agent-ledger")
+	for _, bad := range []string{"../../../../tmp/pwned", "..", ".", "/etc/passwd", "a/b", ""} {
+		writeFile(t, filepath.Join(e.repo, ".git", ledger.MarkerFile), bad)
+		root, err := ledger.Root(e.repo)
+		if err != nil {
+			t.Fatalf("marker %q broke the ledger: %v", bad, err)
+		}
+		parent, name := filepath.Split(filepath.Clean(root))
+		if filepath.Clean(parent) != store || name == "" || name == "." || name == ".." {
+			t.Fatalf("marker %q escaped the store: %q", bad, root)
+		}
+	}
+}
+
+// Identity is a convenience; it must never be the reason a pin is refused.
+func TestUnwritableRepoStillPins(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	e := setup(t)
+	gitDir := filepath.Join(e.repo, ".git")
+	if err := os.Remove(filepath.Join(gitDir, ledger.MarkerFile)); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(gitDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(gitDir, info.Mode()) })
+	if out := e.say("PIN: still works read only", "s1"); !strings.Contains(out, "pinned") {
+		t.Fatalf("a read-only git dir blocked a pin: %q", out)
+	}
+}
+
 func writeFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
