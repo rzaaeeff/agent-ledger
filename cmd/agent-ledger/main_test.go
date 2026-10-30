@@ -672,7 +672,12 @@ func writeFile(t *testing.T, path, body string) {
 func TestConfigLayers(t *testing.T) {
 	e := setup(t)
 	userFile := filepath.Join(e.state, "config", "agent-ledger", "config.json")
-	repoFile := filepath.Join(e.repo, ".agent-ledger.json")
+	// git reports the resolved root (macOS temp dirs live under the /var -> /private/var symlink).
+	realRepo, err := filepath.EvalSymlinks(e.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoFile := filepath.Join(realRepo, ".agent-ledger.json")
 
 	t.Setenv("AGENT_LEDGER_LOGGING", "")
 	c := ledger.LoadConfig(e.repo)
