@@ -220,6 +220,11 @@ func (c *Config) layerFile(path string, repo bool) {
 			c.Problems = append(c.Problems, fmt.Sprintf("%s: %s: unsupported value type, ignored", path, k))
 			continue
 		}
+		if repo && f.name == "promote_to" && v != "AGENTS.md" && v != "CLAUDE.md" {
+			v, _ = cut(v, 40)
+			c.Problems = append(c.Problems, fmt.Sprintf("%s: %s=%q ignored: a repo file may only pick AGENTS.md or CLAUDE.md", path, k, v))
+			continue
+		}
 		if repo && c.loosens(f, v) {
 			v, _ = cut(v, 40)
 			c.Problems = append(c.Problems, fmt.Sprintf("%s: %s=%q ignored: a repo file can only make privacy settings stricter (set it in your own config or env)", path, k, v))

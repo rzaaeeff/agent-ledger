@@ -8,7 +8,7 @@ agent-ledger keeps the lines you mark and puts them back after every compaction.
 PIN: don't touch the migrations, the schema is frozen until Friday
 ```
 
-After `/compact`, the agent sees that pin again, word for word, along with its last 10 recorded decisions. You get a one-line note saying what was restored.
+After `/compact`, the agent sees that pin again, word for word. You get a one-line note saying what was restored.
 
 **Status: v0.1, early.** The hooks are covered by tests that feed them the JSON Claude Code and Codex send. They have not yet been run in a live Claude Code or Codex session. Please report what breaks.
 
@@ -70,7 +70,7 @@ You don't have to remember a pin's exact wording:
 - If nothing or more than one pin matches, nothing is removed and you get the closest pins with their ids.
 - Pinning the same text again does nothing (`PIN!:` on a `PIN:` makes it survive `/clear`); if only case or punctuation differ, you're shown the stored wording so you can reword it. Pinning something close to an existing pin saves it and names the old one, so you can `UNPIN` it if the new one replaces it. The tool never decides that for you.
 
-Decisions: the plugin ships a `record-decision` skill. When you and the agent settle something, it runs `agent-ledger decide "<decision>" "<because>" "<rejected>"`, and the decision comes back after compaction, so you don't rehash rejected options.
+Decisions (advanced): `agent-ledger decide "<decision>" "<because>" "<rejected>"` records one, and the last 10 come back after compaction, labelled as context the agent recorded, not as instructions. Nothing calls it for you: ask the agent to run it, or run it yourself.
 
 To check what is stored or what the next compaction would inject:
 
@@ -84,9 +84,10 @@ Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): C
 ## Privacy
 
 - By default only ledger commands are logged, not your other prompts. `"logging": "all"` also logs every prompt, and then your last 5 come back after compaction.
-- Before anything is stored, common secrets are masked: API keys, GitHub/Slack/AWS tokens, private keys, JWTs, URL passwords and `password=`-style values. This is pattern matching. It will miss some secrets, and it can mask harmless text that looks like one.
+- Before anything is stored, common secrets are masked: API keys, GitHub/Slack/AWS tokens, private keys, JWTs, Stripe keys, Slack webhook URLs, URL passwords, and `password=`-style values (also names like `db_password`, quoted or not). This is pattern matching. It will miss some secrets, and it can mask harmless text that looks like one.
 - Files stay on your machine, under `~/.local/state/agent-ledger/` and readable only by you. The tool itself makes no network calls apart from the one-time binary download; what it re-injects goes to your model provider like the rest of the chat. When a session starts, ledgers in that repo untouched for 30 days are deleted, including their `PIN!:` pins and decisions. `PIN@branch:` pins go once the branch is deleted and idle. Repo and global pins are kept until you `UNPIN` them.
-- A repo's `.agent-ledger.json` can only make `logging`, `redact`, `key` and `prune_days` stricter than your own settings; looser values are ignored and listed by `agent-ledger config`.
+- A repo's `.agent-ledger.json` can only make `logging`, `redact`, `key` and `prune_days` stricter than your own settings, and its `promote_to` may only be `AGENTS.md` or `CLAUDE.md`. Anything else is ignored; the session-start note says so and `agent-ledger config` says why.
+- What comes back after compaction is framed for the agent as your notes: pins are your words; recent prompts and decisions are quoted context, not new instructions. That lowers the risk of old text being read as a fresh order; it does not remove it.
 
 ## Where it works
 
