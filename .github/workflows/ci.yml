@@ -29,7 +29,12 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - run: go build -o "$env:RUNNER_TEMP\agent-ledger.exe" ./cmd/agent-ledger
+      # Stamped with the real version, so the checks below can tell this binary
+      # apart from a downloaded one.
+      - shell: pwsh
+        run: |
+          $v = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          go build -ldflags "-X main.version=$v" -o "$env:RUNNER_TEMP\agent-ledger.exe" ./cmd/agent-ledger
 
       # Codex runs hooks as `cmd.exe /C "<command line>"` with the path from
       # hooks.json, which has no extension. Everything here rests on cmd finding
