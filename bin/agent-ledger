@@ -54,7 +54,8 @@ if [ ! -x "$bin" ]; then
   # Outside a hook (e.g. from the Bash tool) $CLAUDE_PLUGIN_DATA is unset: reuse the
   # copy the hooks downloaded instead of fetching a second one.
   if [ ! -x "$bin" ] && [ -n "${HOME:-}" ]; then
-    for b in "$HOME"/.claude/plugins/data/*/v"$version"/"$name"; do
+    for b in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/data/*/v"$version"/"$name" \
+      "${CODEX_HOME:-$HOME/.codex}"/plugins/data/*/v"$version"/"$name"; do
       if [ -x "$b" ]; then bin="$b"; break; fi
     done
   fi
@@ -85,36 +86,71 @@ download() {
 
 if [ ! -x "$bin" ]; then
   if [ "${1-}" = hook ]; then
-    # Hooks have a 10s budget: fetch in the background, one fetch at a time (a lock
-    # older than 5 minutes is stale), and skip this event.
+    # Fetch in the background (one fetch at a time; a lock older than 5 minutes is
+    # stale) and wait a few seconds for it, so the first prompt after install is
+    # usually handled. SessionEnd has no time to wait.
     err=/dev/null
     mkdir -p "$data" 2>/dev/null
     lock="$data/.download.lock"
     failed="$data/.download.failed"
+    state="${XDG_STATE_HOME:-${HOME:-}/.local/state}/agent-ledger"
     if [ -n "$(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; fi
-    # After a failed download, wait an hour before trying again.
-    if [ -n "$(find "$failed" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then rm -f "$failed"; fi
-    if [ -f "$failed" ]; then
-      msg="$name v$version missing; last download failed, retrying after an hour"
+    # After a failed download wait 5 minutes before retrying, an hour after two in a row.
+    wait_min=5; [ -s "$failed" ] && wait_min=60
+    if [ -n "$(find "$failed" -maxdepth 0 -mmin +$wait_min 2>/dev/null)" ]; then mv -f "$failed" "$failed.prev" 2>/dev/null; fi
+    input=""
+    [ "${2-}" = user-prompt-submit ] && input="$(cat)"
+    # A ledger command must not reach the model unhandled: block it, so the text
+    # stays in the input box to send again. Other prompts go on.
+    say() {
+      set -- "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')" "${2-}" "${3-}"
+      if [ "${2-}" = user-prompt-submit ] && printf '%s' "$input" |
+        grep -qiE '"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(pin|carry|unpin|promote)!?([[:space:]]*@[a-z]+)?!?([[:space:]]*\[[^]"]*\])?[[:space:]]*(:|：)|"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(pins|ledger)\?[[:space:]]*"'; then
+        extra=',"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}'
+        printf '%s' "$input" | grep -q '"turn_id"' && extra=""
+        printf '{"decision":"block","reason":"%s This command was not saved; send it again%s."%s}\n' "$1" "$3" "$extra"
+      else
+        printf '{"systemMessage":"%s"}\n' "$1"
+      fi
+    }
+    failed_msg() {
+      [ -s "$failed" ] && wait_min=60 || wait_min=5
+      msg="$name v$version missing; last download failed, retrying in $wait_min minutes"
       case "${2-}" in
-        user-prompt-submit | session-start) printf '%s\n' '{"systemMessage":"agent-ledger is not working: downloading its binary failed (see ~/.local/state/agent-ledger/skips.log). Nothing is recorded; it retries within an hour."}' ;;
+        user-prompt-submit | session-start)
+          say "agent-ledger is not working: downloading its binary failed (see $state/skips.log). It retries in $wait_min minutes; to retry now, delete $failed." "${2-}" " once agent-ledger works" ;;
       esac
       fail hook
-    fi
+    }
+    [ -f "$failed" ] && failed_msg "$@"
     if mkdir "$lock" 2>/dev/null; then
       (
         ok=0; download || ok=1
-        [ $ok -eq 0 ] || : >"$failed"
+        if [ $ok -eq 0 ]; then rm -f "$failed" "$failed.prev"
+        elif [ -f "$failed.prev" ]; then echo 2 >"$failed"; rm -f "$failed.prev"
+        else : >"$failed"; fi
         rmdir "$lock" 2>/dev/null
         [ $ok -eq 0 ] || fail hook
       ) </dev/null >/dev/null 2>&1 &
       disown 2>/dev/null
     fi
+    if [ "${2-}" != session-end ]; then
+      for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        [ -x "$bin" ] && break
+        [ -d "$lock" ] || break
+        sleep 0.5
+      done
+    fi
+    if [ -x "$bin" ]; then
+      if [ -n "$input" ]; then printf '%s' "$input" | "$bin" "$@"; exit $?; fi
+      exec "$bin" "$@"
+    fi
+    [ -f "$failed" ] && failed_msg "$@"
     msg="$name missing; fetching v$version in the background"
-    # Tell the user once per event that matters; the hook output must stay valid JSON.
+    # The hook output must stay valid JSON.
     case "${2-}" in
-      user-prompt-submit) printf '%s\n' '{"systemMessage":"agent-ledger is still installing (one-time download); this prompt was not recorded. If it was a PIN:, send it again in a few seconds."}' ;;
-      session-start) printf '%s\n' '{"systemMessage":"agent-ledger: downloading its binary in the background (one time)."}' ;;
+      user-prompt-submit) say "agent-ledger is still installing (one-time download); this prompt was not recorded." "${2-}" " in a few seconds" ;;
+      session-start) say "agent-ledger: downloading its binary in the background (one time)." ;;
     esac
     fail hook
   fi
