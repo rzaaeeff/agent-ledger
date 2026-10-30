@@ -55,9 +55,17 @@ jobs:
           $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
           $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
           $json = '{"prompt":"PIN: ci check","cwd":"' + ($PWD.Path -replace '\\', '\\') + '","turn_id":"t1","session_id":"s1"}'
-          $out = $json | & cmd.exe /C $line | Out-String
+          $out = $json | & cmd.exe /C $line 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$out" }
-          if ($out -notmatch '"pinned \[') { throw "unexpected output:`n$out" }
+          if ($out -notmatch '"pinned \[') {
+            # A hook exits 0 whatever happens, so the reason is in skips.log, not here.
+            $log = Join-Path $env:LOCALAPPDATA 'agent-ledger\skips.log'
+            $why = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Raw } else { 'no skips.log' }
+            # Run the script directly too, to tell a shim problem from a script one.
+            $direct = $json | & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+              -File "$PWD\bin\agent-ledger.ps1" hook user-prompt-submit 2>&1 | Out-String
+            throw "unexpected output: [$out]`nskips.log: $why`ndirect: [$direct]"
+          }
           # The reply has to be JSON the agent can read, not just text that looks right.
           $null = $out | ConvertFrom-Json
 
