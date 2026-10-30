@@ -27,20 +27,19 @@ type Note struct {
 	Carry   []Pin  `json:"carry,omitempty"` // CARRY: injected once after /clear
 }
 
-// ClearMarkFile records where the prompt and decision logs stood at the last /clear
+// ClearMarkFile records where the prompt log stood at the last /clear
 // of a session that keeps its id, so a later compact re-injects only what came after.
 // Line offsets, not timestamps: stamps have one-second granularity.
 const ClearMarkFile = "clear_mark.json"
 
 type clearMark struct {
-	Prompts   int `json:"prompts"`
-	Decisions int `json:"decisions"`
+	Prompts int `json:"prompts"`
 }
 
 // markCleared records the current log lengths of an existing session dir.
 func markCleared(dir string) {
 	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-		m := clearMark{len(readLines(filepath.Join(dir, PromptsFile))), len(readLines(filepath.Join(dir, DecisionsFile)))}
+		m := clearMark{len(readLines(filepath.Join(dir, PromptsFile)))}
 		_ = writeReplace(filepath.Join(dir, ClearMarkFile), append(Marshal(m), '\n'))
 	}
 }
@@ -140,7 +139,7 @@ func TakeCleared(root, sid, cwd string, isNew bool) (pick *Note, ambiguous bool)
 		if from == "" && isNew {
 			seen := map[string]bool{}
 			for _, n := range notes {
-				if n.Cwd == cwd && n.Epoch > now-600 {
+				if n.Cwd != "" && canonDir(n.Cwd) == canonDir(cwd) && n.Epoch > now-600 {
 					seen[n.Session] = true
 					from = n.Session
 				}
@@ -237,4 +236,16 @@ func PruneCandidates(cwd, root, keep string, days int) []string {
 		}
 	}
 	return out
+}
+
+// canonDir is cwd made absolute, cleaned and with symlinks resolved, so "$R/",
+// "$R" and a symlink to $R count as one folder for the /clear handoff.
+func canonDir(cwd string) string {
+	if a, err := filepath.Abs(cwd); err == nil {
+		cwd = a
+	}
+	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = r
+	}
+	return filepath.Clean(cwd)
 }

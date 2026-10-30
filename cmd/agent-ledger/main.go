@@ -1,9 +1,8 @@
-// Command agent-ledger keeps the user's pinned rules, prompts and session decisions
+// Command agent-ledger keeps the user's pinned rules, and recent prompts
 // across context compaction. Run as Claude Code hooks, or by hand:
 //
 //	agent-ledger hook user-prompt-submit|session-start|session-end   (hook JSON on stdin)
 //	agent-ledger inject                                              (print the ledger, e.g. in Codex)
-//	agent-ledger decide "<decision>" "<because>" "<rejected>"
 //	agent-ledger status
 //	agent-ledger config                                              (effective settings and their source)
 //	agent-ledger preview [compact|clear|startup|resume]              (dry run of SessionStart)
@@ -14,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/rzaaeeff/agent-ledger/internal/ledger"
 )
@@ -24,7 +22,6 @@ var version = "dev"
 const usage = `usage:
   agent-ledger hook user-prompt-submit|session-start|session-end   (hook JSON on stdin)
   agent-ledger inject
-  agent-ledger decide "<decision>" "<because>" "<rejected>"
   agent-ledger status
   agent-ledger config
   agent-ledger preview [compact|clear|startup|resume]
@@ -34,7 +31,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 func warnFallback(stderr io.Writer) {
 	if ledger.LoadConfig("").Key == ledger.KeySession && ledger.SessionFromEnv() == "" {
-		fmt.Fprintln(stderr, "ledger: no session id (CLAUDE_SESSION_ID, CLAUDE_CODE_SESSION_ID and CODEX_THREAD_ID unset); using the branch ledger")
+		fmt.Fprintln(stderr, "ledger: no session id (CLAUDE_CODE_SESSION_ID, CLAUDE_SESSION_ID and CODEX_THREAD_ID unset); using the branch ledger")
 	}
 }
 
@@ -63,33 +60,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "inject":
 		defer func() { _ = recover() }()
 		ledger.Inject(stdout)
-		return 0
-	case "decide":
-		if len(args) != 4 {
-			fmt.Fprintln(stderr, `usage: agent-ledger decide "<decision>" "<because>" "<rejected>"`)
-			return 2
-		}
-		dir, err := ledger.Dir("", "")
-		if err != nil {
-			fmt.Fprintln(stderr, "decide: not in a git repository")
-			return 1
-		}
-		warnFallback(stderr)
-		path := filepath.Join(dir, ledger.DecisionsFile)
-		d := ledger.Decision{TS: ledger.Now().Format("2006-01-02T15:04:05-07:00"), Decision: args[1], Because: args[2], Rejected: args[3]}
-		if ledger.LoadConfig("").Redact == "on" {
-			d.Decision, _ = ledger.Redact(d.Decision)
-			d.Because, _ = ledger.Redact(d.Because)
-			d.Rejected, _ = ledger.Redact(d.Rejected)
-		}
-		if err = ledger.MkdirPrivate(dir); err == nil {
-			err = ledger.Append(path, ledger.Marshal(d))
-		}
-		if err != nil {
-			fmt.Fprintln(stderr, "decide:", err)
-			return 1
-		}
-		fmt.Fprintln(stdout, "decide: recorded in", path)
 		return 0
 	case "status":
 		dir, err := ledger.Dir("", "")

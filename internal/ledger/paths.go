@@ -1,11 +1,12 @@
-// Package ledger keeps a per-session store of the user's prompts, pinned rules and
-// session decisions outside git, and turns it into hook output for agent CLIs.
+// Package ledger keeps a per-session store of the user's pinned rules and prompts
+// outside git, and turns it into hook output for agent CLIs.
 package ledger
 
 import (
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,6 +66,13 @@ func Root(cwd string) (string, error) {
 	}
 	common, err := git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil || common == "" {
+		// Keep git's reason (e.g. "detected dubious ownership"): it is not always "no repo".
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if line, _, _ := strings.Cut(strings.TrimSpace(string(ee.Stderr)), "\n"); line != "" && !strings.Contains(line, "not a git repository") {
+				return "", fmt.Errorf("%w; git said: %s", ErrNoRepo, line)
+			}
+		}
 		return "", ErrNoRepo
 	}
 	common = filepath.Clean(common)
@@ -86,12 +94,13 @@ func Root(cwd string) (string, error) {
 	return filepath.Join(StateHome(), repo), nil
 }
 
-// SessionFromEnv is the session id for callers without hook JSON (decide, status):
-// $CLAUDE_SESSION_ID, which the SessionStart hook exports from the hook JSON through
-// $CLAUDE_ENV_FILE, then the undocumented $CLAUDE_CODE_SESSION_ID, then Codex's
-// $CODEX_THREAD_ID (the same id its hooks get as session_id).
+// SessionFromEnv is the session id for callers without hook JSON (status, preview):
+// Claude Code's $CLAUDE_CODE_SESSION_ID (set for its Bash tool since 2.1.132), then
+// $CLAUDE_SESSION_ID, which the SessionStart hook exports through $CLAUDE_ENV_FILE
+// (older versions could leave it stale), then Codex's $CODEX_THREAD_ID (the same id
+// its hooks get as session_id).
 func SessionFromEnv() string {
-	for _, k := range []string{"CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"} {
+	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID"} {
 		if v := os.Getenv(k); v != "" {
 			return v
 		}

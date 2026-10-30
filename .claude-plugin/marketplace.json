@@ -5,7 +5,7 @@
     {
       "name": "agent-ledger",
       "source": "./",
-      "description": "Session-scoped pins and decisions that survive compaction."
+      "description": "Pins that come back word for word after compaction."
     }
   ]
 }

@@ -2,24 +2,26 @@ package ledger
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
-// Injection budget: about 2.2k tokens (9000 chars, bytes/4 estimate), under the
-// ~10k-char / 2.5k-token caps Claude Code and Codex put on hook context. Pins are
-// never trimmed: past 2k tokens of pins a warning is added and all are kept.
+// Injection budget, in UTF-8 bytes. Claude Code keeps 10,000 characters of hook
+// context (only a 2,000-character preview beyond that) and Codex about 2,500
+// tokens counted as bytes/4, so 10,000 bytes. MaxBudget stays under both, header
+// included; pins that do not fit are cut, with a warning at the top.
 const (
 	Budget        = 9000
-	DecisionMax   = 600
-	PinWarnChars  = 8000
+	MaxBudget     = 9500
+	PinWarnBytes  = 6000
 	RecentPrompts = 5
-	RecentDecs    = 10
 	PromptMax     = 2000
 	PruneDays     = 30
 )
@@ -32,6 +34,7 @@ type HookInput struct {
 	SessionID string
 	Source    string
 	Reason    string
+	bad       bool // not a JSON object, or a session_id that is not a string or number
 }
 
 // ReadHookInput parses the hook JSON. Invalid input yields an empty HookInput.
@@ -39,10 +42,18 @@ func ReadHookInput(r io.Reader) HookInput {
 	var h HookInput
 	data, _ := io.ReadAll(r)
 	if json.Unmarshal(data, &h.raw) != nil || h.raw == nil {
-		h.raw = map[string]any{}
+		h.raw, h.bad = map[string]any{}, true
 	}
 	str := func(k string) string { s, _ := h.raw[k].(string); return s }
 	h.Prompt, h.Cwd, h.SessionID, h.Source, h.Reason = str("prompt"), str("cwd"), str("session_id"), str("source"), str("reason")
+	switch v := h.raw["session_id"].(type) {
+	case float64:
+		h.SessionID = strconv.FormatFloat(v, 'f', -1, 64)
+	case string, nil:
+	default:
+		// Never fall back to the shared branch ledger for an id we can't read.
+		h.bad = true
+	}
 	if h.Cwd == "" {
 		h.Cwd, _ = os.Getwd()
 	}
@@ -51,6 +62,11 @@ func ReadHookInput(r io.Reader) HookInput {
 
 func emit(w io.Writer, msg string) {
 	fmt.Fprintf(w, "%s\n", Marshal(map[string]string{"systemMessage": msg}))
+}
+
+// block stops the prompt: the user sees msg, the model gets no turn.
+func block(w io.Writer, msg string) {
+	fmt.Fprintf(w, "%s\n", Marshal(map[string]string{"decision": "block", "reason": msg}))
 }
 
 // debug logs one line per hook event to <root>/hooks.debug.log when
@@ -76,7 +92,7 @@ func debug(root, event string, h HookInput) {
 //	UNPIN: <ref>       removes the one pin ref selects, from any of those stores:
 //	                   an id, its number in PINS?, "last", or words in it in any
 //	                   order (case and punctuation ignored); else lists the closest
-//	PROMOTE: <ref>     moves that pin into the repo's AGENTS.md (or CLAUDE.md, or
+//	PROMOTE: <ref>     moves that pin into the repo's CLAUDE.md or AGENTS.md (or
 //	                   promote_to), uncommitted
 //	PIN [ref]: <text>  rewords that pin; it keeps its store and lifetime
 //	PINS?              blocks the prompt; the user (not the model) sees the pins
@@ -94,12 +110,26 @@ func debug(root, event string, h HookInput) {
 // Plain stdout would reach the model, so it prints only a systemMessage JSON (shown
 // to the user) after PIN:/UNPIN:. Problems go to errors.log.
 func HookUserPromptSubmit(h HookInput, out io.Writer) {
-	if h.Prompt == "" {
+	if h.Prompt == "" || h.bad {
 		return
+	}
+	if _, codex := h.raw["turn_id"]; !codex {
+		out = claudeWriter{out}
 	}
 	cfg := LoadConfig(h.Cwd)
 	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
 	if err != nil {
+		why := "agent-ledger could not open its ledger: " + err.Error()
+		if err == ErrNoRepo {
+			why = "agent-ledger works only inside a git repository; this folder is not in one, so nothing is stored here."
+		} else if errors.Is(err, ErrNoRepo) {
+			why = "git could not open this folder as a repository, so nothing is stored here. " + strings.TrimPrefix(err.Error(), ErrNoRepo.Error()+"; ")
+		}
+		if q := strings.TrimSpace(h.Prompt); strings.EqualFold(q, "PINS?") || strings.EqualFold(q, "LEDGER?") {
+			block(out, why)
+		} else if _, ok := parsePin(h.Prompt); ok {
+			emit(out, "ledger: nothing saved: "+why)
+		}
 		return
 	}
 	here := map[string]string{"branch": "this branch", "repo": "this repo"}[cfg.Key]
@@ -109,13 +139,13 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	// Blocking the prompt shows the reason to the user only: no model turn.
 	switch q := strings.TrimSpace(h.Prompt); {
 	case strings.EqualFold(q, "PINS?"):
-		fmt.Fprintf(out, "%s\n", Marshal(map[string]string{"decision": "block", "reason": PinsList(listPins(h.Cwd, dir, here))}))
+		block(out, PinsList(listPins(h.Cwd, dir, here)))
 		return
 	case strings.EqualFold(q, "LEDGER?"):
-		fmt.Fprintf(out, "%s\n", Marshal(map[string]string{"decision": "block", "reason": HelpText(Status(dir))}))
+		block(out, HelpText(Status(dir)))
 		return
 	}
-	pinsHere := func() string { return brief(len(listPins(h.Cwd, dir, here))) }
+	pinsHere := func() string { return brief(listPins(h.Cwd, dir, here)) }
 	prompt, masked := h.Prompt, 0
 	if cfg.Redact == "on" {
 		prompt, masked = Redact(prompt)
@@ -141,10 +171,22 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		if cfg.Logging == "off" {
 			note = ""
 		}
+		msg := ""
 		if hint := nearMiss(prompt); hint != "" {
-			emit(out, hint+note)
+			msg = hint + note
 		} else if note != "" {
-			emit(out, "ledger:"+note)
+			msg = "ledger:" + note
+		}
+		v := map[string]any{}
+		if msg != "" {
+			v["systemMessage"] = msg
+		}
+		// UNPIN/PROMOTE/reword blocked their prompt, so the model learns of them now.
+		if n := takeNotices(dir); n != "" {
+			v["hookSpecificOutput"] = map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": n}
+		}
+		if len(v) > 0 {
+			fmt.Fprintf(out, "%s\n", Marshal(v))
 		}
 		return
 	}
@@ -161,6 +203,18 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		return
 	}
 	out = &suffixWriter{w: out, suffix: note}
+	carry := cmd.verb == "CARRY" && cmd.ref == ""
+	if _, rest, _ := strings.Cut(prompt, "\n"); strings.TrimSpace(rest) != "" {
+		// More than the command line: don't block, the rest is meant for the agent.
+		p := passWriter{w: out}
+		if carry {
+			p.ctx = "agent-ledger: the first line of this prompt (CARRY: ...) is the user's note for the chat after the next /clear. Do not act on it now; the rest of the prompt is for you."
+		}
+		out = p
+	} else if carry {
+		// CARRY is for the chat after /clear: this one must not act on it now.
+		out = blockWriter{out}
+	}
 	if cmd.ref != "" {
 		rewordPin(h, dir, here, cmd, out)
 		return
@@ -180,11 +234,11 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		case cmd.scope == ScopeBranch:
 			b, _ := git(h.Cwd, "branch", "--show-current")
 			if b == "" || DefaultBranches(h.Cwd)[b] {
-				name := b
-				if name == "" {
-					name = "a detached HEAD"
+				why := b + " (the default branch never keeps pins)"
+				if b == "" {
+					why = "a detached HEAD (there is no branch to keep them for)"
 				}
-				emit(out, fmt.Sprintf("PIN@branch refused on %s (the default branch never keeps pins). Use PIN: for this session or PIN@repo: for the repo.", name))
+				emit(out, fmt.Sprintf("PIN@branch refused on %s. Use PIN: for this chat or PIN@repo: for the repo.", why))
 				return
 			}
 			target, where = filepath.Join(filepath.Dir(dir), branchKey(b)), " for branch "+b
@@ -208,6 +262,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			id = pinID(LifeCarry, cmd.text)
 		}
 		file := filepath.Join(target, PinnedFile)
+		id = uniqueID(file, id, cmd.text)
 		all := listPins(h.Cwd, dir, here)
 		var similar []located
 		for _, p := range all {
@@ -215,6 +270,10 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			switch {
 			case sameStore && normText(p.Text) == normText(cmd.text):
 				msg := fmt.Sprintf("already pinned [%s]", p.ID)
+				if !sameText(p.Text, cmd.text) {
+					// Case or punctuation differ ("Foo.go" vs "foo.go"): show the stored text.
+					msg += fmt.Sprintf(" as %q (if the difference matters: PIN [%s]: <text>)", short(p.Text, 60), p.ID)
+				}
 				if life == LifeKeep && p.Life == "" {
 					if err := setLife(file, p.Pin, LifeKeep); err != nil {
 						LogError(dir, "pin upgrade failed")
@@ -241,15 +300,21 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			}
 			msg += " Similar: " + refList(similar) + ". Both are kept; if this one replaces it, send UNPIN: " + similar[0].ID + "."
 		}
+		if cmd.typed != strings.ToUpper(cmd.typed) {
+			msg += " Not meant as a pin? UNPIN: last."
+		}
+		if n := pinBytes(listPins(h.Cwd, dir, here)); n > PinWarnBytes {
+			msg += fmt.Sprintf(" Warning: pins here now take %d of the %d bytes that come back after compaction; UNPIN the ones that no longer apply.", n, MaxBudget)
+		}
 		emit(out, msg+" "+pinsHere())
 	case "UNPIN", "PROMOTE":
 		if cmd.verb == "PROMOTE" && (cmd.scope != "" || cmd.keep) {
-			emit(out, "PROMOTE takes no scope or '!': PROMOTE: <id or text>.")
+			block(out, "PROMOTE takes no scope or '!': PROMOTE: <id or text>.")
 			return
 		}
 		hit, miss := pickPin(cmd.verb, cmd.text, listPins(h.Cwd, dir, here))
 		if miss != "" {
-			emit(out, miss)
+			block(out, miss)
 			return
 		}
 		p, from := hit.Pin, hit.File
@@ -257,11 +322,12 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			switch ok, err := Unpin(from, p); {
 			case err != nil:
 				LogError(dir, "unpin failed")
-				emit(out, "UNPIN failed, see "+filepath.Join(dir, ErrorsFile))
+				block(out, "UNPIN failed, see "+filepath.Join(dir, ErrorsFile))
 			case !ok:
-				emit(out, fmt.Sprintf("UNPIN did nothing: [%s] was already gone. %s", p.ID, pinsHere()))
+				block(out, fmt.Sprintf("UNPIN did nothing: [%s] was already gone. %s", p.ID, pinsHere()))
 			default:
-				emit(out, fmt.Sprintf("unpinned [%s] %q. %s", p.ID, short(p.Text, 60), pinsHere()))
+				notice(dir, fmt.Sprintf("The user removed pin [%s] %q; it no longer applies.", p.ID, p.Text))
+				block(out, fmt.Sprintf("unpinned [%s] %q. %s", p.ID, short(p.Text, 60), pinsHere()))
 			}
 			return
 		}
@@ -272,7 +338,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		}
 		if err != nil {
 			LogError(dir, "promote failed: "+err.Error())
-			emit(out, "PROMOTE failed: "+err.Error())
+			block(out, "PROMOTE failed: "+err.Error())
 			return
 		}
 		unpinned := "unpinned it"
@@ -282,11 +348,12 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		} else if !ok {
 			unpinned = "it was already unpinned"
 		}
+		notice(dir, fmt.Sprintf("The user moved pin [%s] %q into %s as a project rule.", p.ID, p.Text, filepath.Base(target)))
 		msg := fmt.Sprintf("promoted [%s] to %s; %s. Not committed: review with git diff.", p.ID, filepath.Base(target), unpinned)
 		if !added {
 			msg = fmt.Sprintf("[%s] was already in %s; %s.", p.ID, filepath.Base(target), unpinned)
 		}
-		emit(out, msg+" "+pinsHere())
+		block(out, msg+" "+pinsHere())
 	}
 }
 
@@ -319,22 +386,28 @@ func pickPin(verb, ref string, all []located) (located, string) {
 // gets the id of its new text.
 func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
 	if cmd.verb != "PIN" || cmd.keep || cmd.scope != "" {
-		emit(out, "ledger: nothing saved. To reword a pin: PIN [id]: new text (it keeps its scope and lifetime).")
+		block(out, "ledger: nothing saved. To reword a pin: PIN [id]: new text (it keeps its scope and lifetime).")
 		return
 	}
 	all := listPins(h.Cwd, dir, here)
 	hit, miss := pickPin("PIN [ref]", cmd.ref, all)
 	if miss != "" {
-		emit(out, strings.Replace(miss, "Send PIN [ref]: <id>", "Send PIN [<id>]: <new text>", 1))
+		if _, isNum := pinNumber(cmd.ref); !isNum && !strings.EqualFold(cmd.ref, "last") && len(matching(cmd.ref, all)) == 0 {
+			// "PIN [WIP]: x" with no pin [WIP] is a pin whose text starts with [WIP].
+			cmd.ref, cmd.text = "", "["+cmd.ref+"] "+cmd.text
+			HookUserPromptSubmit(HookInput{raw: h.raw, Prompt: "PIN: " + cmd.text, Cwd: h.Cwd, SessionID: h.SessionID}, out)
+			return
+		}
+		block(out, strings.Replace(miss, "Send PIN [ref]: <id>", "Send PIN [<id>]: <new text>", 1))
 		return
 	}
 	if hit.Text == cmd.text {
-		emit(out, fmt.Sprintf("[%s] already says that.", hit.ID))
+		block(out, fmt.Sprintf("[%s] already says that.", hit.ID))
 		return
 	}
 	for _, o := range all {
 		if o.File == hit.File && o.ID != hit.ID && (o.Life == LifeCarry) == (hit.Life == LifeCarry) && normText(o.Text) == normText(cmd.text) {
-			emit(out, fmt.Sprintf("ledger: nothing changed: [%s] already says that. To drop the old one: UNPIN: %s", o.ID, hit.ID))
+			block(out, fmt.Sprintf("ledger: nothing changed: [%s] already says that. To drop the old one: UNPIN: %s", o.ID, hit.ID))
 			return
 		}
 	}
@@ -342,16 +415,67 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, out io.Writer) {
 	if hit.Life == LifeCarry {
 		scope = LifeCarry
 	}
-	p := Pin{pinID(scope, cmd.text), Now().Format(time.RFC3339Nano), cmd.text, hit.Life}
+	p := Pin{uniqueID(hit.File, pinID(scope, cmd.text), cmd.text), Now().Format(time.RFC3339Nano), cmd.text, hit.Life}
 	switch ok, err := replacePin(hit.File, hit.Pin, p); {
 	case err != nil:
 		LogError(dir, "reword failed")
-		emit(out, "PIN NOT SAVED: could not reword ["+hit.ID+"], see "+filepath.Join(dir, ErrorsFile))
+		block(out, "PIN NOT SAVED: could not reword ["+hit.ID+"], see "+filepath.Join(dir, ErrorsFile))
 	case !ok:
-		emit(out, fmt.Sprintf("PIN NOT SAVED: [%s] was removed meanwhile.", hit.ID))
+		block(out, fmt.Sprintf("PIN NOT SAVED: [%s] was removed meanwhile.", hit.ID))
 	default:
-		emit(out, fmt.Sprintf("reworded [%s] -> [%s] (%s). %s", hit.ID, p.ID, hit.Where, brief(len(listPins(h.Cwd, dir, here)))))
+		notice(dir, fmt.Sprintf("The user reworded pin [%s] %q; it is now [%s] %q.", hit.ID, hit.Text, p.ID, p.Text))
+		block(out, fmt.Sprintf("reworded [%s] -> [%s] (%s). %s", hit.ID, p.ID, hit.Where, brief(listPins(h.Cwd, dir, here))))
 	}
+}
+
+// claudeWriter adds suppressOriginalPrompt to a block, so Claude Code does not
+// echo the prompt under the reply. Codex rejects unknown fields there.
+type claudeWriter struct{ w io.Writer }
+
+func (c claudeWriter) Write(b []byte) (int, error) {
+	var v map[string]any
+	if json.Unmarshal(b, &v) == nil && v["decision"] == "block" && v["hookSpecificOutput"] == nil {
+		v["hookSpecificOutput"] = map[string]any{"hookEventName": "UserPromptSubmit", "suppressOriginalPrompt": true}
+		_, err := fmt.Fprintf(c.w, "%s\n", Marshal(v))
+		return len(b), err
+	}
+	return c.w.Write(b)
+}
+
+// blockWriter turns a systemMessage into a block: the user sees it, the model
+// gets nothing.
+type blockWriter struct{ w io.Writer }
+
+func (k blockWriter) Write(b []byte) (int, error) {
+	var v map[string]string
+	if json.Unmarshal(b, &v) == nil && v["systemMessage"] != "" && len(v) == 1 {
+		block(k.w, v["systemMessage"])
+		return len(b), nil
+	}
+	return k.w.Write(b)
+}
+
+// passWriter turns a block into a plain systemMessage, so the prompt still
+// reaches the agent.
+// With ctx, it also tells the model ctx.
+type passWriter struct {
+	w   io.Writer
+	ctx string
+}
+
+func (p passWriter) Write(b []byte) (int, error) {
+	var v map[string]any
+	if json.Unmarshal(b, &v) != nil {
+		return p.w.Write(b)
+	}
+	if v["decision"] == "block" {
+		v = map[string]any{"systemMessage": v["reason"]}
+	}
+	if p.ctx != "" && v["systemMessage"] != nil && v["hookSpecificOutput"] == nil {
+		v["hookSpecificOutput"] = map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": p.ctx}
+	}
+	_, err := fmt.Fprintf(p.w, "%s\n", Marshal(v))
+	return len(b), err
 }
 
 // suffixWriter adds suffix to the systemMessage emitted through it (the redaction note).
@@ -364,30 +488,37 @@ func (s *suffixWriter) Write(b []byte) (int, error) {
 	if s.suffix == "" {
 		return s.w.Write(b)
 	}
-	var v map[string]string
-	if json.Unmarshal(b, &v) == nil && v["systemMessage"] != "" {
-		v["systemMessage"] += s.suffix
-		_, err := fmt.Fprintf(s.w, "%s\n", Marshal(v))
-		return len(b), err
+	var v map[string]any
+	if json.Unmarshal(b, &v) == nil {
+		for _, k := range []string{"systemMessage", "reason"} {
+			if m, _ := v[k].(string); m != "" {
+				v[k] = m + s.suffix
+				_, err := fmt.Fprintf(s.w, "%s\n", Marshal(v))
+				return len(b), err
+			}
+		}
 	}
 	return s.w.Write(b)
 }
 
 // HookSessionStart prints what must survive a compaction: the ledger's pinned
-// rules, last prompts and last decisions. By the hook's source:
+// rules and (with logging=all) last prompts. By the hook's source:
 //
 //	compact  prints everything.
 //	clear    with clear=drop (default for key=session) adds no context: the pins
 //	         were dropped, so it only shows the user which ones, once, as a
-//	         systemMessage. With clear=keep it prints the pins and decisions.
+//	         systemMessage. With clear=keep it prints the pins.
 //	resume   prints nothing (the transcript is already loaded).
 //	startup  deletes this repo's ledgers idle for prune_days, then prints the
 //	         ledger (for a new session usually empty).
 //
 // Any other or missing source prints everything, which is what a manual run (for
 // example from Codex, keyed by branch) wants. With a session id it also exports
-// CLAUDE_SESSION_ID through $CLAUDE_ENV_FILE, for decide and status.
+// CLAUDE_SESSION_ID through $CLAUDE_ENV_FILE, for status and preview.
 func HookSessionStart(h HookInput, out io.Writer) {
+	if h.bad {
+		return
+	}
 	if h.SessionID != "" {
 		if f := os.Getenv("CLAUDE_ENV_FILE"); f != "" {
 			_ = appendRaw(f, []byte("export CLAUDE_SESSION_ID="+SessionKey(h.SessionID)+"\n"))
@@ -425,6 +556,9 @@ func HookSessionStart(h HookInput, out io.Writer) {
 		msg = "ledger: restored " + n.String() + " after compaction."
 	} else if n.pins > 0 {
 		msg = "ledger: " + pinsApply(n.pins) + " (PINS? lists them)."
+	}
+	if h.Source == "startup" && len(cfg.Problems) > 0 {
+		msg = strings.TrimSpace(msg + " agent-ledger ignored some settings; `agent-ledger config` says why.")
 	}
 	if h.Source == "startup" {
 		if hint := filepath.Join(root, HintedFile); !fileExists(hint) && MkdirPrivate(root) == nil &&
@@ -494,22 +628,23 @@ func tail[T any](xs []T, n int) []T {
 	return xs
 }
 
-// Compose builds the context block for the ledger in dir, within cfg.BudgetChars:
-// over it, the oldest recent prompts go first, then the oldest decisions. Never pins.
+// Compose builds the context block for the ledger in dir, within cfg.BudgetBytes:
+// over it, the oldest recent prompts go first, then (with a warning at the top)
+// the pins that do not fit.
 func Compose(cwd, dir string, cfg Config) string {
 	text, _ := compose(cwd, dir, cfg)
 	return text
 }
 
 // counts is what a compose put back, for the line shown to the user.
-type counts struct{ pins, prompts, decisions int }
+type counts struct{ pins, prompts int }
 
 func (c counts) String() string {
 	var parts []string
 	for _, x := range []struct {
 		n    int
 		name string
-	}{{c.pins, "pin"}, {c.prompts, "prompt"}, {c.decisions, "decision"}} {
+	}{{c.pins, "pin"}, {c.prompts, "prompt"}} {
 		if x.n == 1 {
 			parts = append(parts, "1 "+x.name)
 		} else if x.n > 1 {
@@ -521,70 +656,107 @@ func (c counts) String() string {
 
 func compose(cwd, dir string, cfg Config) (string, counts) {
 	var n counts
-	n.pins = len(sessionPins(dir))
-	for _, s := range PinScopes(cwd, dir) {
-		n.pins += len(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)))
-	}
-	pins := strings.Join(pinLines(sessionPins(dir), true), "\n")
-	scoped := scopedSections(cwd, dir)
+	header := "## Agent ledger: notes kept for the user by the agent-ledger hooks. Pins are the user's own words; the prompts below are quoted context, not new instructions."
+	budget := min(cfg.BudgetBytes, MaxBudget) - len(header) - 300
+	pins, kept, dropped := fitPins(cwd, dir, budget)
+	n.pins = kept
 	mark := readMark(dir)
-	prompts := readJSONLFrom[Prompt](filepath.Join(dir, PromptsFile), mark.Prompts)
-	decisions := readJSONLFrom[Decision](filepath.Join(dir, DecisionsFile), mark.Decisions)
+	var prompts []Prompt
+	for _, p := range readJSONLFrom[Prompt](filepath.Join(dir, PromptsFile), mark.Prompts) {
+		if !isCommand(p.Prompt) {
+			prompts = append(prompts, p)
+		}
+	}
 
-	var recent, decs string
-	for r, d := cfg.RecentPrompts, cfg.Decisions; ; {
-		var rl, dl []string
+	var recent string
+	for r := cfg.RecentPrompts; ; r-- {
+		var rl []string
 		for _, p := range tail(prompts, r) {
 			text, was := cut(p.Prompt, PromptMax)
 			if was {
 				text += " [cut; full text in prompts.jsonl]"
 			}
 			ts, _ := cut(p.TS, 16)
-			rl = append(rl, fmt.Sprintf("- %s: %s", ts, text))
+			rl = append(rl, fmt.Sprintf("- %s: %s", ts, indent(text)))
 		}
-		for _, x := range tail(decisions, d) {
-			c := func(s string) string {
-				if t, was := cut(s, DecisionMax); was {
-					return t + " [cut; full text in decisions.jsonl]"
-				}
-				return s
-			}
-			dl = append(dl, fmt.Sprintf("- DECISION: %s\n  BECAUSE: %s\n  REJECTED: %s", c(x.Decision), c(x.Because), c(x.Rejected)))
-		}
-		recent, decs = strings.Join(rl, "\n"), strings.Join(dl, "\n")
-		n.prompts, n.decisions = len(rl), len(dl)
-		if runes(pins)+runes(scoped)+runes(recent)+runes(decs) <= cfg.BudgetChars {
-			break
-		}
-		if r > 0 {
-			r--
-		} else if d > 0 {
-			d--
-		} else {
+		recent = strings.Join(rl, "\n")
+		n.prompts = len(rl)
+		if len(pins)+len(recent)+60 <= budget || r <= 0 {
 			break
 		}
 	}
-	if pins+scoped+recent+decs == "" {
+	if pins+recent == "" && dropped == 0 {
 		return "", counts{}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Agent ledger (re-injected after compact; full logs in %s)", dir)
-	if pins != "" {
-		b.WriteString("\n### Pinned by the user (standing rules and concerns, verbatim)\n" + pins)
+	b.WriteString(header)
+	if dropped > 0 {
+		fmt.Fprintf(&b, "\nWARNING: %d pinned item(s) did not fit the size limit and are NOT shown. Tell the user to send PINS? and UNPIN the ones that no longer apply.", dropped)
+	} else if len(pins) > PinWarnBytes {
+		b.WriteString("\nNOTE: the pins are close to the size limit; newer ones may be cut. The user can UNPIN old ones.")
 	}
-	b.WriteString(scoped)
-	if n := runes(pins) + runes(scoped); n > cfg.BudgetChars {
-		b.WriteString("\nWARNING: pinned items exceed the injection budget; the host may truncate this block. UNPIN: <id> the ones that no longer apply.")
-	} else if n > PinWarnChars {
-		b.WriteString("\nWARNING: pinned items exceed 2k tokens; UNPIN: <id> the ones that no longer apply.")
-	}
+	b.WriteString(pins)
 	if recent != "" {
-		b.WriteString("\n### Last prompts from the user\n" + recent)
+		b.WriteString("\n### Last prompts from the user (may already be done)\n" + recent)
 	}
-	if decs != "" {
-		b.WriteString("\n### Session decisions\n" + decs)
+	return capBytes(b.String(), MaxBudget), n
+}
+
+// fitPins is the pin sections (this ledger, then branch, repo and global) within
+// budget bytes: whole pins in that order until one does not fit. kept and cut
+// count the pins shown and left out.
+func fitPins(cwd, dir string, budget int) (text string, kept, dropped int) {
+	type section struct {
+		title string
+		lines []string
 	}
-	return b.String(), n
+	secs := []section{{"Pinned by the user (standing rules and concerns, verbatim)", pinLines(sessionPins(dir), true)}}
+	for _, s := range PinScopes(cwd, dir) {
+		secs = append(secs, section{s.Label, pinLines(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)), false)})
+	}
+	var b strings.Builder
+	for _, s := range secs {
+		titled := false
+		for _, l := range s.lines {
+			add := "\n" + l
+			if !titled {
+				add = "\n### " + s.title + add
+			}
+			if dropped > 0 || b.Len()+len(add) > budget {
+				dropped++
+				continue
+			}
+			b.WriteString(add)
+			titled = true
+			kept++
+		}
+	}
+	return b.String(), kept, dropped
+}
+
+// capBytes cuts s to at most n bytes on a line (else rune) boundary.
+func capBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	s = s[:n]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	if i := strings.LastIndexByte(s, '\n'); i > n/2 {
+		s = s[:i]
+	}
+	return s
+}
+
+// isCommand reports whether a logged prompt was a ledger command, which does
+// not come back as one of the user's last prompts.
+func isCommand(prompt string) bool {
+	if _, ok := parsePin(prompt); ok {
+		return true
+	}
+	q := strings.TrimSpace(prompt)
+	return strings.EqualFold(q, "PINS?") || strings.EqualFold(q, "LEDGER?")
 }
 
 // cleared runs on SessionStart after /clear: drops this session's pins if
@@ -603,6 +775,9 @@ func cleared(cfg Config, root, dir string, h HookInput, out io.Writer) {
 	var msg, ctx []string
 	if ambiguous {
 		msg = append(msg, "ledger: several chats were /cleared in this folder in the last 10 minutes, so I can't tell which one this was; no pins were carried over. PIN: again what still applies.")
+	}
+	if note == nil && !ambiguous && statErr != nil && cfg.Key == KeySession && unlinkedKeeps(root, dir) {
+		msg = append(msg, "ledger: nothing was handed over to this chat. If the chat you cleared had PIN!: or CARRY: items, they stayed in its own ledger: this /clear was not reported to agent-ledger (Codex never reports it; Claude Code can cut the hook short). For rules that must survive /clear there, use PIN@branch: or PIN@repo:.")
 	}
 	if note != nil {
 		// PIN! pins stay in place for the same session; a new id gets a copy.
@@ -652,7 +827,7 @@ func cleared(cfg Config, root, dir string, h HookInput, out io.Writer) {
 	}
 	if len(ctx) > 0 {
 		v["hookSpecificOutput"] = map[string]string{"hookEventName": "SessionStart",
-			"additionalContext": "## Agent ledger (after /clear)\n" + strings.Join(ctx, "\n")}
+			"additionalContext": capBytes("## Agent ledger (after /clear)\n"+strings.Join(ctx, "\n"), MaxBudget)}
 	}
 	fmt.Fprintf(out, "%s\n", Marshal(v))
 }
@@ -686,4 +861,60 @@ func HookSessionEnd(h HookInput) {
 	}
 	markCleared(dir)
 	_ = ClearPins(dir, root, h.SessionID, h.Cwd)
+}
+
+// NoticesFile in a ledger holds pin changes the model has not been told about:
+// UNPIN, PROMOTE and rewording block their prompt, so the next prompt carries them.
+const NoticesFile = "notices.jsonl"
+
+func notice(dir, text string) {
+	_ = Append(filepath.Join(dir, NoticesFile), Marshal(map[string]string{"ts": stamp(), "text": text}))
+}
+
+// takeNotices removes and returns the pending notices as context for the model.
+func takeNotices(dir string) string {
+	path := filepath.Join(dir, NoticesFile)
+	if !fileExists(path) {
+		return ""
+	}
+	var lines []string
+	_ = withLock(path, func() error {
+		for _, n := range ReadJSONL[map[string]string](path) {
+			lines = append(lines, "- "+n["text"])
+		}
+		return os.Remove(path)
+	})
+	if len(lines) == 0 {
+		return ""
+	}
+	return capBytes("agent-ledger: the user changed pinned rules since your last turn:\n"+strings.Join(lines, "\n"), 4000)
+}
+
+// indent keeps multi-line quoted text inside its list item, so a line in a
+// prompt cannot pass for a heading of the ledger.
+func indent(s string) string {
+	return strings.ReplaceAll(strings.TrimRight(s, "\n"), "\n", "\n    ")
+}
+
+// unlinkedKeeps reports whether another session ledger under root changed its
+// PIN! or CARRY items in the last hour: a /clear that left no note may have
+// lost them.
+func unlinkedKeeps(root, dir string) bool {
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		path := filepath.Join(root, e.Name())
+		if !e.IsDir() || path == dir || e.Name() == RepoKey || strings.HasPrefix(e.Name(), "@") {
+			continue
+		}
+		f := filepath.Join(path, PinnedFile)
+		if fi, err := os.Stat(f); err != nil || fi.ModTime().Before(Now().Add(-time.Hour)) {
+			continue
+		}
+		for _, p := range ReadJSONL[Pin](f) {
+			if p.Life == LifeKeep || p.Life == LifeCarry {
+				return true
+			}
+		}
+	}
+	return false
 }

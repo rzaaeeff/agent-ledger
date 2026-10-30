@@ -13,23 +13,44 @@ const PromoteHeading = "## Pinned rules (promoted from agent-ledger)"
 
 const maxPromoteBytes = 1 << 20
 
-// PromoteTarget is the file PROMOTE: writes in the work tree of cwd: cfg.PromoteTo,
-// else AGENTS.md if it exists, else CLAUDE.md if it exists, else AGENTS.md.
+// PromoteTarget is the file PROMOTE: writes in the work tree of cwd: cfg.PromoteTo;
+// else the one of AGENTS.md and CLAUDE.md that exists; with both, AGENTS.md if
+// CLAUDE.md imports or links to it (both agents then read it) or under Codex,
+// else CLAUDE.md, the only one Claude Code reads when both exist; with neither,
+// AGENTS.md, which both read.
 func PromoteTarget(cfg Config, cwd string) (string, error) {
 	top, err := git(cwd, "rev-parse", "--show-toplevel")
 	if err != nil || top == "" {
 		return "", ErrNoRepo
 	}
-	name := cfg.PromoteTo
-	if name == "" {
-		name = "AGENTS.md"
-		if _, err := os.Stat(filepath.Join(top, name)); err != nil {
-			if _, err := os.Stat(filepath.Join(top, "CLAUDE.md")); err == nil {
-				name = "CLAUDE.md"
-			}
-		}
+	if cfg.PromoteTo != "" {
+		return filepath.Join(top, cfg.PromoteTo), nil
 	}
-	return filepath.Join(top, name), nil
+	agents, claude := filepath.Join(top, "AGENTS.md"), filepath.Join(top, "CLAUDE.md")
+	_, aErr := os.Lstat(agents)
+	_, cErr := os.Lstat(claude)
+	switch {
+	case cErr != nil:
+		return agents, nil
+	case aErr != nil:
+		return claude, nil
+	case importsAgents(claude), os.Getenv("CODEX_THREAD_ID") != "" && os.Getenv("CLAUDE_PROJECT_DIR") == "":
+		return agents, nil
+	}
+	return claude, nil
+}
+
+// importsAgents reports whether CLAUDE.md links to AGENTS.md or imports it (@AGENTS.md).
+func importsAgents(claude string) bool {
+	if t, err := os.Readlink(claude); err == nil {
+		return filepath.Base(t) == "AGENTS.md"
+	}
+	fi, err := os.Stat(claude)
+	if err != nil || fi.Size() > maxPromoteBytes {
+		return false
+	}
+	data, _ := os.ReadFile(claude)
+	return regexp.MustCompile(`(?m)(^|\s)@(\./)?AGENTS\.md\b`).Match(data)
 }
 
 // addRule puts "- text" at the end of the PromoteHeading section of path, adding

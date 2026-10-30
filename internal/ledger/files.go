@@ -12,11 +12,10 @@ import (
 
 // File names inside a session ledger.
 const (
-	PromptsFile   = "prompts.jsonl"
-	PinnedFile    = "pinned.jsonl"
-	DecisionsFile = "decisions.jsonl"
-	ErrorsFile    = "errors.log"
-	ClearedFile   = "pinned.cleared.jsonl"
+	PromptsFile = "prompts.jsonl"
+	PinnedFile  = "pinned.jsonl"
+	ErrorsFile  = "errors.log"
+	ClearedFile = "pinned.cleared.jsonl"
 )
 
 // Pin is one pinned rule, stored verbatim.
@@ -32,14 +31,6 @@ type Prompt struct {
 	TS      string `json:"ts"`
 	Session string `json:"session"`
 	Prompt  string `json:"prompt"`
-}
-
-// Decision is one recorded session decision.
-type Decision struct {
-	TS       string `json:"ts"`
-	Decision string `json:"decision"`
-	Because  string `json:"because"`
-	Rejected string `json:"rejected"`
 }
 
 // Now is the clock; tests replace it.
@@ -150,9 +141,9 @@ func Status(dir string) string {
 	for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
 		chars += len(p.Text) + 1
 	}
-	return fmt.Sprintf("ledger: %d pins (~%d tokens) | %d prompts | %d decisions | %d errors",
+	return fmt.Sprintf("ledger: %d pins (~%d tokens) | %d prompts | %d errors",
 		countLines(filepath.Join(dir, PinnedFile)), chars/4,
-		countLines(filepath.Join(dir, PromptsFile)), countLines(filepath.Join(dir, DecisionsFile)),
+		countLines(filepath.Join(dir, PromptsFile)),
 		countLines(filepath.Join(dir, ErrorsFile)))
 }
 

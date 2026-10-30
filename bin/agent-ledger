@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Picks the prebuilt binary for this OS/arch, downloading it from the release once if missing.
+# The download goes to the plugin's data folder ($CLAUDE_PLUGIN_DATA or $PLUGIN_DATA, which
+# uninstalling removes), else ${XDG_DATA_HOME:-~/.local/share}/agent-ledger, under v<version>/;
+# not into the plugin folder, whose contents Codex fingerprints for hook approval.
 # Hook calls never fail the session: on any problem they log to skips.log and exit 0.
 set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,7 +11,7 @@ repo="rzaaeeff/agent-ledger"
 
 fail() {
   if [ "${1-}" = hook ]; then
-    state="${XDG_STATE_HOME:-$HOME/.local/state}/agent-ledger"
+    state="${XDG_STATE_HOME:-${HOME:-}/.local/state}/agent-ledger"
     mkdir -p "$state" 2>/dev/null && chmod 700 "$state" 2>/dev/null
     printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$msg" >>"$state/skips.log" 2>/dev/null
     exit 0
@@ -34,13 +37,33 @@ case "$(uname -m)" in
 esac
 ext=""; [ "$os" = windows ] && ext=".exe"
 name="agent-ledger-$os-$arch$ext"
+version="$(cat "$root/VERSION" 2>/dev/null)"
 bin="$here/$name"
+if [ ! -x "$bin" ]; then
+  # The first folder that has the binary, else the first one that is set.
+  data="" xdg=""
+  if [ -n "${XDG_DATA_HOME:-}" ]; then xdg="$XDG_DATA_HOME/agent-ledger"
+  elif [ -n "${HOME:-}" ]; then xdg="$HOME/.local/share/agent-ledger"; fi
+  for d in "${CLAUDE_PLUGIN_DATA:-}" "${PLUGIN_DATA:-}" "$xdg"; do
+    [ -n "$d" ] || continue
+    [ -n "$data" ] || data="$d/v$version"
+    if [ -x "$d/v$version/$name" ]; then data="$d/v$version"; break; fi
+  done
+  if [ -z "$data" ]; then msg="HOME is not set"; fail "$@"; fi
+  bin="$data/$name"
+  # Outside a hook (e.g. from the Bash tool) $CLAUDE_PLUGIN_DATA is unset: reuse the
+  # copy the hooks downloaded instead of fetching a second one.
+  if [ ! -x "$bin" ] && [ -n "${HOME:-}" ]; then
+    for b in "$HOME"/.claude/plugins/data/*/v"$version"/"$name"; do
+      if [ -x "$b" ]; then bin="$b"; break; fi
+    done
+  fi
+fi
 
 download() {
-  version="$(cat "$root/VERSION" 2>/dev/null)"
   base="https://github.com/$repo/releases/download/v$version"
-  tmp="$here/.download.$$"
-  rm -rf "$tmp" && mkdir -p "$tmp" || { msg="cannot create $tmp"; return 1; }
+  tmp="$data/.download.$$"
+  mkdir -p "$data" && rm -rf "$tmp" && mkdir -p "$tmp" || { msg="cannot create $tmp"; return 1; }
   if ! curl -fsSL --max-time 60 -o "$tmp/$name" "$base/$name" 2>"$err" ||
     ! curl -fsSL --max-time 20 -o "$tmp/checksums.txt" "$base/checksums.txt" 2>"$err"; then
     rm -rf "$tmp"; msg="download of $name v$version failed"; return 1
@@ -65,17 +88,34 @@ if [ ! -x "$bin" ]; then
     # Hooks have a 10s budget: fetch in the background, one fetch at a time (a lock
     # older than 5 minutes is stale), and skip this event.
     err=/dev/null
-    lock="$here/.download.lock"
+    mkdir -p "$data" 2>/dev/null
+    lock="$data/.download.lock"
+    failed="$data/.download.failed"
     if [ -n "$(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; fi
+    # After a failed download, wait an hour before trying again.
+    if [ -n "$(find "$failed" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then rm -f "$failed"; fi
+    if [ -f "$failed" ]; then
+      msg="$name v$version missing; last download failed, retrying after an hour"
+      case "${2-}" in
+        user-prompt-submit | session-start) printf '%s\n' '{"systemMessage":"agent-ledger is not working: downloading its binary failed (see ~/.local/state/agent-ledger/skips.log). Nothing is recorded; it retries within an hour."}' ;;
+      esac
+      fail hook
+    fi
     if mkdir "$lock" 2>/dev/null; then
       (
         ok=0; download || ok=1
+        [ $ok -eq 0 ] || : >"$failed"
         rmdir "$lock" 2>/dev/null
         [ $ok -eq 0 ] || fail hook
       ) </dev/null >/dev/null 2>&1 &
       disown 2>/dev/null
     fi
-    msg="$name missing; fetching v$(cat "$root/VERSION" 2>/dev/null) in the background"
+    msg="$name missing; fetching v$version in the background"
+    # Tell the user once per event that matters; the hook output must stay valid JSON.
+    case "${2-}" in
+      user-prompt-submit) printf '%s\n' '{"systemMessage":"agent-ledger is still installing (one-time download); this prompt was not recorded. If it was a PIN:, send it again in a few seconds."}' ;;
+      session-start) printf '%s\n' '{"systemMessage":"agent-ledger: downloading its binary in the background (one time)."}' ;;
+    esac
     fail hook
   fi
   err=/dev/stderr

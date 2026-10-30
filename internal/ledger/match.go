@@ -44,8 +44,10 @@ func contentWords(s string, minLen int) map[string]bool {
 	return out
 }
 
-// pinMatches is how UNPIN:/PROMOTE: find a pin: its id, or text in it ignoring
-// case, spacing and punctuation, or all the query's words in any order.
+// pinMatches is how UNPIN:/PROMOTE: find a pin: its id, or all the query's
+// words in any order, ignoring case and punctuation. Words match whole, or as the
+// start of a pin word when 4+ letters long ("migration" finds "migrations"), so
+// "all" never matches "called". Queries under 3 letters match only an id.
 func pinMatches(p Pin, q string) bool {
 	q = strings.TrimSpace(q)
 	if q == "" {
@@ -54,23 +56,28 @@ func pinMatches(p Pin, q string) bool {
 	if strings.EqualFold(p.ID, strings.Trim(q, "[]")) {
 		return true
 	}
-	nq := normText(q)
-	if nq == "" {
-		return false
-	}
-	if strings.Contains(normText(p.Text), nq) {
+	if nq := normText(q); nq != "" && nq == normText(p.Text) {
 		return true
 	}
-	pw := map[string]bool{}
-	for _, w := range normWords(p.Text) {
-		pw[w] = true
+	if len([]rune(strings.ReplaceAll(normText(q), " ", ""))) < 3 {
+		return false
 	}
+	pw := normWords(p.Text)
 	for w := range contentWords(q, 1) {
-		if !pw[w] {
+		if !hasWord(pw, w) {
 			return false
 		}
 	}
 	return true
+}
+
+func hasWord(words []string, w string) bool {
+	for _, x := range words {
+		if x == w || (len([]rune(w)) >= 4 && strings.HasPrefix(x, w)) {
+			return true
+		}
+	}
+	return false
 }
 
 // similarity is the word overlap (Jaccard) of two texts' content words, 0..1.
@@ -165,8 +172,18 @@ func resolveRef(q string, pins []located) string {
 	return q
 }
 
-// matching is the pins q selects; one entry per store and id.
+// matching is the pins q selects; one entry per store and id. Pins whose whole
+// text is q win over pins that merely contain its words.
 func matching(q string, pins []located) []located {
+	var exact []located
+	for _, p := range pins {
+		if nq := normText(q); nq != "" && nq == normText(p.Text) {
+			exact = append(exact, p)
+		}
+	}
+	if len(exact) > 0 {
+		pins = exact
+	}
 	var out []located
 	seen := map[string]bool{}
 	for _, p := range pins {
@@ -240,8 +257,33 @@ func PinsList(pins []located) string {
 	return b.String()
 }
 
-// brief is the short state appended to PIN/UNPIN replies.
-func brief(n int) string { return "(" + pinsApply(n) + ")" }
+// brief is the short state appended to PIN/UNPIN replies; CARRY items wait for
+// the next /clear, so they are counted apart.
+func brief(pins []located) string {
+	n, c := 0, 0
+	for _, p := range pins {
+		if p.Life == LifeCarry {
+			c++
+		} else {
+			n++
+		}
+	}
+	if c > 0 {
+		return fmt.Sprintf("(%s; %d CARRY waiting for /clear)", pinsApply(n), c)
+	}
+	return "(" + pinsApply(n) + ")"
+}
+
+// pinBytes is the size of the pins that come back after compaction (not CARRY).
+func pinBytes(pins []located) int {
+	n := 0
+	for _, p := range pins {
+		if p.Life != LifeCarry {
+			n += len(p.ID) + len(p.Text) + 6
+		}
+	}
+	return n
+}
 
 func pinsApply(n int) string {
 	if n == 1 {
@@ -262,7 +304,7 @@ Start a prompt with (any case; only at the start):
   PIN@branch: / PIN@repo: / PIN@global: <text>   every chat on the branch / in the repo / everywhere
   PIN [ref]: <new text>   reword a pin
   UNPIN: <ref>            remove a pin
-  PROMOTE: <ref>          move a pin into AGENTS.md (uncommitted)
+  PROMOTE: <ref>          move a pin into CLAUDE.md or AGENTS.md (uncommitted)
   PINS?                   list pins          LEDGER?   this help
 <ref> is a number from PINS?, an id, "last", or words from the pin.
 Only you see PINS? and LEDGER?; the agent gets nothing.
@@ -310,4 +352,10 @@ func setLife(path string, pin Pin, life string) error {
 		}
 		return writeReplace(path, []byte(data))
 	})
+}
+
+// sameText reports whether a and b are equal apart from spacing; a duplicate that
+// differs in case or punctuation is reported with the stored text.
+func sameText(a, b string) bool {
+	return strings.Join(strings.Fields(a), " ") == strings.Join(strings.Fields(b), " ")
 }
