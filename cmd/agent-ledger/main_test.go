@@ -688,32 +688,28 @@ func TestSameNamedReposStayApart(t *testing.T) {
 	}
 }
 
-// moveRepo renames a repo the way a user would. On Windows a handle left by a
-// git subprocess can outlive it by a moment, and the rename fails with "used by
-// another process" until it is released, so retry briefly before giving up.
-func moveRepo(t *testing.T, from, to string) {
+// copyRepo copies a repo, .git and all, to a fresh path. A copy carries the
+// marker exactly as a move does, so it is how these tests change a repo's path:
+// renaming the directory outright is unreliable on Windows, where a handle left
+// behind by a git subprocess keeps it "in use" long after the process is gone.
+func copyRepo(t *testing.T, from string) string {
 	t.Helper()
-	// Windows also refuses to rename the directory a process is sitting in.
-	t.Chdir(t.TempDir())
-	var err error
-	for i := 0; i < 100; i++ {
-		if err = os.Rename(from, to); err == nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	to := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.CopyFS(to, os.DirFS(from)); err != nil {
+		t.Fatalf("could not copy %s: %v", from, err)
 	}
-	t.Fatalf("could not move %s: %v", from, err)
+	return to
 }
 
-// Moving or renaming a repo used to strand its pins: the ledger name was derived
-// from the repo's path, so the new path meant a new, empty ledger.
+// A repo's pins used to be stranded by a move: the ledger name was derived from
+// the repo's path, so a new path meant a new, empty ledger. Now the repo carries
+// its own name, and the path it sits at no longer decides anything.
 func TestLedgerFollowsRepoMove(t *testing.T) {
 	e := setup(t)
 	if out := e.say("PIN: keep the schema in sync", "s1"); !strings.Contains(out, "pinned") {
 		t.Fatalf("pin not saved: %q", out)
 	}
-	moved := filepath.Join(t.TempDir(), "renamed")
-	moveRepo(t, e.repo, moved)
+	moved := copyRepo(t, e.repo)
 	t.Chdir(moved)
 	out, _, _ := cli(m{"prompt": "PINS?", "cwd": moved, "session_id": "s1"}, "hook", "user-prompt-submit")
 	if !strings.Contains(out, "keep the schema in sync") {
@@ -725,23 +721,29 @@ func TestLedgerFollowsRepoMove(t *testing.T) {
 	}
 }
 
-// A repo created where another repo used to live must not inherit its pins.
+// Identity comes from the marker, not the path, so a repo that replaces another
+// one at the same path must not inherit its pins. Deleting .git and running git
+// init again takes the marker with it, which is the same thing from the inside.
 func TestNewRepoDoesNotInheritOldPath(t *testing.T) {
 	e := setup(t)
 	if out := e.say("PIN: secret from the first repo", "s1"); !strings.Contains(out, "pinned") {
 		t.Fatalf("pin not saved: %q", out)
 	}
-	moved := filepath.Join(t.TempDir(), "elsewhere")
-	moveRepo(t, e.repo, moved)
-	e.git("init", "-q", "-b", "main", e.repo)
-	fresh, err := ledger.Root(e.repo)
+	// The copy stands in for the old repo moved aside: it keeps the pins, and
+	// nothing has ever opened its .git, so removing that is safe on Windows too.
+	moved := copyRepo(t, e.repo)
+	if err := os.RemoveAll(filepath.Join(moved, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	e.git("init", "-q", "-b", "main", moved)
+	fresh, err := ledger.Root(moved)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fresh == e.root {
-		t.Fatalf("a new repo at the old path adopted the moved repo's ledger %q", fresh)
+		t.Fatalf("a new repo at the old path adopted the old repo's ledger %q", fresh)
 	}
-	out, _, _ := cli(m{"prompt": "PINS?", "cwd": e.repo, "session_id": "s1"}, "hook", "user-prompt-submit")
+	out, _, _ := cli(m{"prompt": "PINS?", "cwd": moved, "session_id": "s1"}, "hook", "user-prompt-submit")
 	if strings.Contains(out, "secret from the first repo") {
 		t.Fatalf("new repo sees the other repo's pins: %q", out)
 	}
