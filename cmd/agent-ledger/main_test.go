@@ -708,28 +708,7 @@ func TestLedgerFollowsRepoMove(t *testing.T) {
 	}
 }
 
-// A ledger written before markers existed has no marker. It must be adopted where
-// it is, not abandoned, and the marker written so the next move is safe.
-func TestAdoptsLedgerFromOlderVersion(t *testing.T) {
-	e := setup(t)
-	marker := filepath.Join(e.repo, ".git", ledger.MarkerFile)
-	owner := filepath.Join(e.root, ledger.OwnerFile)
-	for _, f := range []string{marker, owner} {
-		if err := os.Remove(f); err != nil {
-			t.Fatalf("expected %s to exist: %v", filepath.Base(f), err)
-		}
-	}
-	root, err := ledger.Root(e.repo)
-	if err != nil || root != e.root {
-		t.Fatalf("old ledger not adopted: got %q want %q (%v)", root, e.root, err)
-	}
-	if got, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(got)) != filepath.Base(e.root) {
-		t.Fatalf("marker not written on adoption: %q (%v)", got, err)
-	}
-}
-
-// A new repo created at a moved repo's old path computes the same path-derived
-// name. It must not inherit the other repo's pins.
+// A repo created where another repo used to live must not inherit its pins.
 func TestNewRepoDoesNotInheritOldPath(t *testing.T) {
 	e := setup(t)
 	if out := e.say("PIN: secret from the first repo", "s1"); !strings.Contains(out, "pinned") {

@@ -59,45 +59,42 @@ func git(cwd string, args ...string) (string, error) {
 	return strings.TrimRight(string(out), "\r\n"), err
 }
 
-// uniqueSuffix is 6 random bytes in hex, or "" if the system has no randomness,
-// in which case the caller keeps the name it already had.
-func uniqueSuffix() string {
-	var b [6]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return ""
-	}
-	return hex.EncodeToString(b[:])
-}
-
 // MarkerFile, in the repo's git common dir, names that repo's ledger directory.
-// It is what makes the ledger survive a move or a rename: without it the name is
-// derived from the repo's path, so moving the repo silently started a new ledger
-// and left the old pins behind. Git ignores the common dir, so the marker never
-// shows up in git status and is never carried by a clone.
+// It is what makes the ledger survive a move: the name used to be derived from
+// the repo's path, so moving the repo silently started an empty ledger. Git does
+// not show the common dir in git status, and git clone does not copy it, so a
+// clone gets its own ledger.
 const MarkerFile = "agent-ledger-id"
 
-// OwnerFile, in the ledger directory, marks the ledger as claimed by a repo that
-// carries a marker. A repo with no marker that lands on a claimed name is a
-// different repo reusing an old path, not the owner coming back, so it gets its
-// own ledger instead of the other repo's pins. The file holds the repo's path at
-// the time of the claim, which is a hint for a human reading the store and
-// nothing more: the path goes stale the moment the repo moves.
-const OwnerFile = "claimed-by"
-
-// pathName is the pre-marker ledger name: the repo name plus a hash of its path.
-// Still the name every new ledger starts with, so a build without marker support
-// keeps reading the same directory.
-func pathName(common string) string {
-	name := filepath.Base(filepath.Dir(common))
-	if filepath.Base(common) != ".git" {
-		name = filepath.Base(common)
+// newName is a fresh ledger name: the repo name, so the store stays readable, and
+// 6 random bytes, so two repos never collide however they are named or moved.
+func newName(common string) (string, error) {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
 	}
+	return Safe(repoName(common), 60, false) + "-" + hex.EncodeToString(b[:]), nil
+}
+
+// fallbackName is used when the marker cannot be written: the repo name plus a
+// hash of its path, which is stable without anything stored in the repo. It is
+// the pre-marker scheme, so it moves with the repo's path rather than the repo.
+func fallbackName(common string) string {
 	key := common
 	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		key = strings.ToLower(key)
 	}
 	sum := sha1.Sum([]byte(key))
-	return Safe(name, 60, false) + "-" + hex.EncodeToString(sum[:])[:6]
+	return Safe(repoName(common), 60, false) + "-" + hex.EncodeToString(sum[:])[:6]
+}
+
+// repoName is the repo's directory name, or the common dir's own name for a
+// submodule, whose common dir is .git/modules/<name>.
+func repoName(common string) string {
+	if filepath.Base(common) != ".git" {
+		return filepath.Base(common)
+	}
+	return filepath.Base(filepath.Dir(common))
 }
 
 // readMarker is the ledger name recorded for this repo, or "" if there is none.
@@ -109,29 +106,6 @@ func readMarker(common string) string {
 	}
 	line, _, _ := strings.Cut(string(b), "\n")
 	return Safe(strings.TrimSpace(line), 100, true)
-}
-
-// claim records name as this repo's ledger and this repo as the ledger's owner.
-// Both writes are best effort: a read-only common dir or store costs the rename
-// resistance, which is worth less than the pin the user is trying to save.
-func claim(common, name string) {
-	_ = os.WriteFile(filepath.Join(common, MarkerFile), []byte(name+"\n"), 0o600)
-	dir := filepath.Join(StateHome(), name)
-	if err := MkdirPrivate(dir); err == nil {
-		owner := filepath.Join(dir, OwnerFile)
-		if _, err := os.Stat(owner); err != nil {
-			_ = os.WriteFile(owner, []byte(common+"\n"), 0o600)
-		}
-	}
-}
-
-// claimed reports whether some repo with a marker already owns the ledger at
-// name. Reached only when this repo has no marker, so the owner is somebody
-// else. A ledger with no claim file was written before markers existed and
-// belongs to whoever is at this path now, which is the upgrade path.
-func claimed(name string) bool {
-	_, err := os.Stat(filepath.Join(StateHome(), name, OwnerFile))
-	return err == nil
 }
 
 // Root is the store of the repo containing cwd, shared by all its worktrees: keyed
@@ -155,19 +129,20 @@ func Root(cwd string) (string, error) {
 	if real, err := filepath.EvalSymlinks(common); err == nil {
 		common = real
 	}
-	// A marker written on first use wins, so the ledger follows the repo when it
-	// moves. Without one, fall back to the path-derived name and record it.
+	// The marker written on first use is what the ledger is named after, so it
+	// follows the repo when it moves.
 	if name := readMarker(common); name != "" {
 		return filepath.Join(StateHome(), name), nil
 	}
-	name := pathName(common)
-	if claimed(name) {
-		// Another repo's ledger sits at that name, so take a fresh one.
-		if u := uniqueSuffix(); u != "" {
-			name += "-" + u
-		}
+	name, err := newName(common)
+	if err == nil {
+		err = os.WriteFile(filepath.Join(common, MarkerFile), []byte(name+"\n"), 0o600)
 	}
-	claim(common, name)
+	if err != nil {
+		// No randomness, or a read-only .git. Identity must never be the reason a
+		// pin is refused, so use the name that needs nothing written down.
+		name = fallbackName(common)
+	}
 	return filepath.Join(StateHome(), name), nil
 }
 
