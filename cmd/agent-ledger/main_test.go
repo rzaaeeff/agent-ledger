@@ -696,6 +696,9 @@ func TestLedgerFollowsRepoMove(t *testing.T) {
 		t.Fatalf("pin not saved: %q", out)
 	}
 	moved := filepath.Join(t.TempDir(), "renamed")
+	// Windows refuses to rename the directory a process is sitting in, and setup
+	// left us inside the repo.
+	t.Chdir(t.TempDir())
 	if err := os.Rename(e.repo, moved); err != nil {
 		t.Fatal(err)
 	}
@@ -717,6 +720,8 @@ func TestNewRepoDoesNotInheritOldPath(t *testing.T) {
 		t.Fatalf("pin not saved: %q", out)
 	}
 	moved := filepath.Join(t.TempDir(), "elsewhere")
+	// Windows refuses to rename the directory a process is sitting in.
+	t.Chdir(t.TempDir())
 	if err := os.Rename(e.repo, moved); err != nil {
 		t.Fatal(err)
 	}
