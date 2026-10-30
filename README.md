@@ -129,6 +129,8 @@ By default each chat has its own ledger, keyed by the session id Claude Code or 
 
 After `/clear`, Claude Code starts a new session id. Your `PIN!:` pins and `CARRY:` items move to it only if exactly one chat in the same folder was cleared in the last 10 minutes. If several were, or the end-of-chat hook didn't run, nothing moves and you are told. A forked chat starts its own ledger (it sees branch, repo and global pins, not the original chat's).
 
+Which repo you are in is decided by the path of its `.git` directory, so two checkouts with the same name stay apart and a subdirectory uses the same ledger as the root. That path also names the ledger folder, so moving or renaming a repo starts an empty one. Nothing warns you: you just see "No pins here". The old pins are not lost, they sit under the old folder name in `~/.local/state/agent-ledger/` (`agent-ledger status` prints the path of the ledger in use, which shows you the naming). The idle cleanup only ever looks at the repo you are in, so that folder stays until you delete it: copy anything you still want, or pin it again.
+
 Without a hook session id (`status`, `preview`), the ledger comes from `CLAUDE_CODE_SESSION_ID`, `CLAUDE_SESSION_ID` or `CODEX_THREAD_ID`, else the current branch (`detached` on a detached HEAD). You get a warning when it falls back to the branch.
 
 ## Configuration
