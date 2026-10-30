@@ -71,14 +71,14 @@ func readJSONLFrom[T any](path string, skip int) []T {
 // taken (both archived to pinned.cleared.jsonl), PIN! pins stay. It leaves a note
 // in root for SessionStart(clear) with all three. Does nothing when there are no
 // pins. Calling it again (SessionEnd and SessionStart both do) only re-notes the
-// kept pins; TakeCleared merges the notes.
-func ClearPins(dir, root, sid, cwd string) error {
+// kept pins; TakeCleared merges the notes. noted reports whether it left a note.
+func ClearPins(dir, root, sid, cwd string) (noted bool, err error) {
 	path := filepath.Join(dir, PinnedFile)
 	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
-		return nil
+		return false, nil
 	}
 	var drop, kept, carry []Pin
-	err := withLock(path, func() error {
+	err = withLock(path, func() error {
 		var keep, gone []string
 		for _, l := range readLines(path) {
 			var p Pin
@@ -107,13 +107,20 @@ func ClearPins(dir, root, sid, cwd string) error {
 		return writeLines(path, keep)
 	})
 	if err != nil || len(drop)+len(kept)+len(carry) == 0 {
-		return err
+		return false, err
 	}
-	now := Now()
-	return Append(filepath.Join(root, NotesFile), Marshal(Note{
-		N: fmt.Sprintf("%s.%d.%d", sid, now.UnixNano(), os.Getpid()), Session: sid, Cwd: cwd, Dir: dir,
-		Epoch: now.Unix(), Pins: drop, Kept: kept, Carry: carry}))
+	return true, addNote(root, Note{Session: sid, Cwd: cwd, Dir: dir, Pins: drop, Kept: kept, Carry: carry})
 }
+
+// addNote appends n, stamped now, to root's notes. A note with no pins records
+// that a /clear was reported and had nothing to hand over.
+func addNote(root string, n Note) error {
+	now := Now()
+	n.N, n.Epoch = fmt.Sprintf("%s.%d.%d", n.Session, now.UnixNano(), os.Getpid()), now.Unix()
+	return Append(filepath.Join(root, NotesFile), Marshal(n))
+}
+
+func (n Note) empty() bool { return len(n.Pins)+len(n.Kept)+len(n.Carry) == 0 }
 
 // TakeCleared removes and returns the notes for session sid, merged: the ones
 // from the same session id, else, only for a session with no ledger yet (isNew:
@@ -122,10 +129,12 @@ func ClearPins(dir, root, sid, cwd string) error {
 // If notes of more than one other session qualify, it cannot tell which chat was
 // cleared and takes none (ambiguous reports it): kept pins reach the model, so a
 // guess could hand one chat's rules to another. Notes older than a day are dropped.
-func TakeCleared(root, sid, cwd string, isNew bool) (pick *Note, ambiguous bool) {
+// reported says a /clear from cwd left a note in the last 10 minutes, even an
+// empty one (nothing to hand over); empty notes are never picked from another session.
+func TakeCleared(root, sid, cwd string, isNew bool) (pick *Note, ambiguous, reported bool) {
 	path := filepath.Join(root, NotesFile)
 	if _, err := os.Stat(path); err != nil {
-		return nil, false
+		return nil, false, false
 	}
 	_ = withLock(path, func() error {
 		now := Now().Unix()
@@ -133,15 +142,18 @@ func TakeCleared(root, sid, cwd string, isNew bool) (pick *Note, ambiguous bool)
 		from := ""
 		for _, n := range notes {
 			if n.Session == sid {
-				from = sid
+				from, reported = sid, true
 			}
 		}
 		if from == "" && isNew {
 			seen := map[string]bool{}
 			for _, n := range notes {
 				if n.Cwd != "" && canonDir(n.Cwd) == canonDir(cwd) && n.Epoch > now-600 {
-					seen[n.Session] = true
-					from = n.Session
+					reported = true
+					if !n.empty() {
+						seen[n.Session] = true
+						from = n.Session
+					}
 				}
 			}
 			if len(seen) > 1 {
@@ -161,7 +173,7 @@ func TakeCleared(root, sid, cwd string, isNew bool) (pick *Note, ambiguous bool)
 		}
 		return writeReplace(path, []byte(strings.Join(keep, "\n")+"\n"))
 	})
-	return pick, ambiguous
+	return pick, ambiguous, reported
 }
 
 func mergeNote(into *Note, n Note) *Note {

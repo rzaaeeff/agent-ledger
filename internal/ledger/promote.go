@@ -9,7 +9,11 @@ import (
 )
 
 // PromoteHeading is the section PROMOTE: adds rules to.
-const PromoteHeading = "## Pinned rules (promoted from agent-ledger)"
+// It does not say "pinned": agents took that as the place to write pins to.
+const PromoteHeading = "## Project rules"
+
+// oldPromoteHeading is the v0.1.0-v0.1.1 heading; rules still go under it if present.
+const oldPromoteHeading = "## Pinned rules (promoted from agent-ledger)"
 
 const maxPromoteBytes = 1 << 20
 
@@ -82,7 +86,7 @@ func addRule(path, text string) (added bool, err error) {
 	heads := mdHeadings(lines)
 	start := -1
 	for i, l := range lines {
-		if heads[i] && strings.TrimSpace(l) == PromoteHeading {
+		if t := strings.TrimSpace(l); heads[i] && (t == PromoteHeading || t == oldPromoteHeading) {
 			start = i
 		}
 	}

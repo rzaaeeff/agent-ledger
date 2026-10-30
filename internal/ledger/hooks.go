@@ -64,6 +64,33 @@ func emit(w io.Writer, msg string) {
 	fmt.Fprintf(w, "%s\n", Marshal(map[string]string{"systemMessage": msg}))
 }
 
+// PinNote is what the model gets with a stored PIN: without it, agents tend to
+// copy the rule into auto memory or AGENTS.md, where UNPIN and /clear can't reach it.
+const PinNote = "agent-ledger keeps the user's pins and puts them back after every compaction for as long as they stay pinned; the user removes them with UNPIN. Do not save pins to memory, CLAUDE.md, AGENTS.md or any other file."
+
+// pinned reports a stored PIN to the user. A PIN alone is blocked (no model
+// turn) and the model gets news, if any, with the next prompt; a PIN with more
+// lines goes on, with news and PinNote as context. CARRY gets neither: it is
+// blocked, or its own note says not to act on it yet.
+func pinned(w io.Writer, dir, msg, verb string, pass bool, news string) {
+	switch {
+	case verb != "PIN":
+		emit(w, msg)
+	case pass:
+		ctx := "agent-ledger: the PIN line in this prompt is stored. " + PinNote
+		if news != "" {
+			ctx = "agent-ledger: " + news + " " + PinNote
+		}
+		fmt.Fprintf(w, "%s\n", Marshal(map[string]any{"systemMessage": msg,
+			"hookSpecificOutput": map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": ctx}}))
+	default:
+		if news != "" {
+			notice(dir, news)
+		}
+		emit(w, msg)
+	}
+}
+
 // block stops the prompt: the user sees msg, the model gets no turn.
 func block(w io.Writer, msg string) {
 	fmt.Fprintf(w, "%s\n", Marshal(map[string]string{"decision": "block", "reason": msg}))
@@ -204,14 +231,16 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	}
 	out = &suffixWriter{w: out, suffix: note}
 	carry := cmd.verb == "CARRY" && cmd.ref == ""
+	pass := false
 	if _, rest, _ := strings.Cut(prompt, "\n"); strings.TrimSpace(rest) != "" {
 		// More than the command line: don't block, the rest is meant for the agent.
 		p := passWriter{w: out}
 		if carry {
 			p.ctx = "agent-ledger: the first line of this prompt (CARRY: ...) is the user's note for the chat after the next /clear. Do not act on it now; the rest of the prompt is for you."
 		}
-		out = p
-	} else if carry {
+		out, pass = p, true
+	} else if cmd.verb == "PIN" || carry {
+		// A PIN alone costs no model turn: the model gets it with the next prompt.
 		// CARRY is for the chat after /clear: this one must not act on it now.
 		out = blockWriter{out}
 	}
@@ -282,7 +311,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 					}
 					msg += "; it now survives /clear"
 				}
-				emit(out, msg+". "+pinsHere())
+				pinned(out, dir, msg+". "+pinsHere(), cmd.verb, pass, "")
 				return
 			case p.ID != id && looksSimilar(p.Text, cmd.text):
 				similar = append(similar, p)
@@ -306,7 +335,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		if n := pinBytes(listPins(h.Cwd, dir, here)); n > PinWarnBytes {
 			msg += fmt.Sprintf(" Warning: pins here now take %d of the %d bytes that come back after compaction; UNPIN the ones that no longer apply.", n, MaxBudget)
 		}
-		emit(out, msg+" "+pinsHere())
+		pinned(out, dir, msg+" "+pinsHere(), cmd.verb, pass, fmt.Sprintf("The user pinned [%s]%s: %q. It applies from now on.", id, where, cmd.text))
 	case "UNPIN", "PROMOTE":
 		if cmd.verb == "PROMOTE" && (cmd.scope != "" || cmd.keep) {
 			block(out, "PROMOTE takes no scope or '!': PROMOTE: <id or text>.")
@@ -349,7 +378,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			unpinned = "it was already unpinned"
 		}
 		notice(dir, fmt.Sprintf("The user moved pin [%s] %q into %s as a project rule.", p.ID, p.Text, filepath.Base(target)))
-		msg := fmt.Sprintf("promoted [%s] to %s; %s. Not committed: review with git diff.", p.ID, filepath.Base(target), unpinned)
+		msg := fmt.Sprintf("promoted [%s] to %s; %s. Not committed: review with git status and git diff.", p.ID, filepath.Base(target), unpinned)
 		if !added {
 			msg = fmt.Sprintf("[%s] was already in %s; %s.", p.ID, filepath.Base(target), unpinned)
 		}
@@ -570,7 +599,7 @@ func HookSessionStart(h HookInput, out io.Writer) {
 		// clear=keep: no prompts, plus the CARRY handoff, once.
 		c := takeCarry(dir)
 		_, statErr := os.Stat(dir)
-		if note, _ := TakeCleared(root, h.SessionID, h.Cwd, statErr != nil || cfg.Key != KeySession); note != nil {
+		if note, _, _ := TakeCleared(root, h.SessionID, h.Cwd, statErr != nil || cfg.Key != KeySession); note != nil {
 			c = append(c, note.Carry...)
 		}
 		if len(c) > 0 {
@@ -770,13 +799,13 @@ func cleared(cfg Config, root, dir string, h HookInput, out io.Writer) {
 	if !isNew {
 		markCleared(dir)
 	}
-	_ = ClearPins(dir, root, h.SessionID, h.Cwd)
-	note, ambiguous := TakeCleared(root, h.SessionID, h.Cwd, isNew)
+	_, _ = ClearPins(dir, root, h.SessionID, h.Cwd)
+	note, ambiguous, reported := TakeCleared(root, h.SessionID, h.Cwd, isNew)
 	var msg, ctx []string
 	if ambiguous {
 		msg = append(msg, "ledger: several chats were /cleared in this folder in the last 10 minutes, so I can't tell which one this was; no pins were carried over. PIN: again what still applies.")
 	}
-	if note == nil && !ambiguous && statErr != nil && cfg.Key == KeySession && unlinkedKeeps(root, dir) {
+	if note == nil && !ambiguous && !reported && statErr != nil && cfg.Key == KeySession && unlinkedKeeps(root, dir) {
 		msg = append(msg, "ledger: nothing was handed over to this chat. If the chat you cleared had PIN!: or CARRY: items, they stayed in its own ledger: this /clear was not reported to agent-ledger (Codex never reports it; Claude Code can cut the hook short). For rules that must survive /clear there, use PIN@branch: or PIN@repo:.")
 	}
 	if note != nil {
@@ -851,16 +880,14 @@ func HookSessionEnd(h HookInput) {
 	}
 	if cfg.Clear != "drop" {
 		// clear=keep: only hand the CARRY items over, in case /clear changes the id.
-		if c := takeCarry(dir); len(c) > 0 {
-			now := Now()
-			_ = Append(filepath.Join(root, NotesFile), Marshal(Note{
-				N: fmt.Sprintf("%s.%d.%d", h.SessionID, now.UnixNano(), os.Getpid()), Session: h.SessionID,
-				Cwd: h.Cwd, Dir: dir, Epoch: now.Unix(), Carry: c}))
-		}
+		// An empty note still tells SessionStart(clear) that this /clear was reported.
+		_ = addNote(root, Note{Session: h.SessionID, Cwd: h.Cwd, Dir: dir, Carry: takeCarry(dir)})
 		return
 	}
 	markCleared(dir)
-	_ = ClearPins(dir, root, h.SessionID, h.Cwd)
+	if noted, err := ClearPins(dir, root, h.SessionID, h.Cwd); err == nil && !noted {
+		_ = addNote(root, Note{Session: h.SessionID, Cwd: h.Cwd, Dir: dir})
+	}
 }
 
 // NoticesFile in a ledger holds pin changes the model has not been told about:
@@ -887,7 +914,7 @@ func takeNotices(dir string) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	return capBytes("agent-ledger: the user changed pinned rules since your last turn:\n"+strings.Join(lines, "\n"), 4000)
+	return capBytes("agent-ledger: the user changed pinned rules since your last turn:\n"+strings.Join(lines, "\n")+"\n"+PinNote, 4000)
 }
 
 // indent keeps multi-line quoted text inside its list item, so a line in a

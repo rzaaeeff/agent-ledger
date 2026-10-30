@@ -210,7 +210,7 @@ func TestLoggingAndPins(t *testing.T) {
 		}
 	}
 
-	msg := sysMsg(t, e.say("PIN: never commit to main", "s1"))
+	msg := blockMsg(t, e.say("PIN: never commit to main", "s1"))
 	if !regexp.MustCompile(`^pinned \[[0-9a-f]{6}\]\. \(1 pin applies here\)$`).MatchString(msg) {
 		t.Errorf("PIN message = %q", msg)
 	}
@@ -445,8 +445,11 @@ func TestSizeCap(t *testing.T) {
 func TestCommandsBlockAndCount(t *testing.T) {
 	e := setup(t)
 	isBlock := func(out string) bool { return strings.Contains(out, `"decision":"block"`) }
-	if out := e.say("PIN: keep it short", "s1"); isBlock(out) {
-		t.Errorf("PIN must let the prompt through: %s", out)
+	if out := e.say("PIN: keep it short", "s1"); !isBlock(out) {
+		t.Errorf("a PIN alone must not cost a model turn: %s", out)
+	}
+	if out := e.say("PIN: keep it shorter\nnow fix the bug", "s1"); isBlock(out) || !strings.Contains(out, "Do not save pins") {
+		t.Errorf("PIN with more lines must go on, with the note: %s", out)
 	}
 	for _, p := range []string{"UNPIN: nothing like this", "PROMOTE: 9", "PIN [zz9]: x"} {
 		if out := e.say(p, "s1"); !isBlock(out) && p != "PIN [zz9]: x" {
@@ -462,7 +465,7 @@ func TestCommandsBlockAndCount(t *testing.T) {
 		t.Errorf("commands must not come back as last prompts:\n%s", out)
 	}
 	// An unknown [ref] is part of a new pin, not a reword.
-	if msg := sysMsg(t, e.say("PIN [WIP]: auth refactor", "s1")); !strings.Contains(msg, "pinned") {
+	if msg := blockMsg(t, e.say("PIN [WIP]: auth refactor", "s1")); !strings.Contains(msg, "pinned") {
 		t.Errorf("PIN [WIP]: %s", msg)
 	}
 	if !strings.Contains(e.inject("compact", "s1"), "[WIP] auth refactor") {
@@ -492,7 +495,7 @@ func TestCommandsBlockAndCount(t *testing.T) {
 	if strings.Contains(out, "] line one now") || strings.Contains(out, "now do the work\n###") {
 		t.Errorf("multi-line PIN pinned more than its first line:\n%s", out)
 	}
-	if !strings.Contains(sysMsg(t, e.say("pin: numpy is broken", "s3")), "UNPIN: last") {
+	if !strings.Contains(blockMsg(t, e.say("pin: numpy is broken", "s3")), "UNPIN: last") {
 		t.Error("lower-case pin must offer an undo")
 	}
 }
@@ -841,15 +844,15 @@ func hookOut(t *testing.T, out string) (msg, ctx string) {
 
 func TestPinScopes(t *testing.T) {
 	e := setup(t)
-	if msg := sysMsg(t, e.say("PIN@branch: no", "s1")); !strings.Contains(msg, "refused on main") {
+	if msg := blockMsg(t, e.say("PIN@branch: no", "s1")); !strings.Contains(msg, "refused on main") {
 		t.Errorf("PIN@branch on main: %q", msg)
 	}
 	e.checkout("--detach")
-	if msg := sysMsg(t, e.say("PIN@branch: no", "s1")); !strings.Contains(msg, "refused on a detached HEAD") {
+	if msg := blockMsg(t, e.say("PIN@branch: no", "s1")); !strings.Contains(msg, "refused on a detached HEAD") {
 		t.Errorf("PIN@branch detached: %q", msg)
 	}
 	e.checkout("-b", "feat")
-	if msg := sysMsg(t, e.say("PIN@branch: feat rule", "s1")); !strings.Contains(msg, "for branch feat") {
+	if msg := blockMsg(t, e.say("PIN@branch: feat rule", "s1")); !strings.Contains(msg, "for branch feat") {
 		t.Errorf("PIN@branch: %q", msg)
 	}
 	e.say("PIN@repo: repo rule", "s1")
@@ -915,7 +918,7 @@ func TestPinScopes(t *testing.T) {
 func TestPinLifetimes(t *testing.T) {
 	e := setup(t)
 	e.say("PIN: plain rule", "s1")
-	if msg := sysMsg(t, e.say("PIN!: sticky rule", "s1")); !strings.Contains(msg, "kept across /clear") {
+	if msg := blockMsg(t, e.say("PIN!: sticky rule", "s1")); !strings.Contains(msg, "kept across /clear") {
 		t.Errorf("PIN!: %q", msg)
 	}
 	if msg := blockMsg(t, e.say("CARRY: next, write the tests", "s1")); !strings.Contains(msg, "after the next /clear") {
@@ -1089,7 +1092,7 @@ func TestPrivacy(t *testing.T) {
 	if !strings.Contains(msg, "redacted 1 secret") || strings.Contains(lastField(t, prompts, "prompt"), "hunter22") {
 		t.Errorf("redaction: msg %q, stored %q", msg, lastField(t, prompts, "prompt"))
 	}
-	msg = sysMsg(t, e.say("PIN: token=abcd1234efgh", "s1"))
+	msg = blockMsg(t, e.say("PIN: token=abcd1234efgh", "s1"))
 	if !strings.Contains(msg, "pinned") || !strings.Contains(msg, "redacted 1") {
 		t.Errorf("pin redaction note: %q", msg)
 	}
@@ -1133,7 +1136,7 @@ func TestPromote(t *testing.T) {
 	if !strings.Contains(msg, "promoted") || !strings.Contains(msg, "CLAUDE.md") || !strings.Contains(msg, "0 pins") {
 		t.Errorf("promote: %q", msg)
 	}
-	if got := read(filepath.Join(e.repo, "CLAUDE.md")); got != "# Rules\n\n- be brief\n\n## Pinned rules (promoted from agent-ledger)\n\n- run the tests first\n" {
+	if got := read(filepath.Join(e.repo, "CLAUDE.md")); got != "# Rules\n\n- be brief\n\n## Project rules\n\n- run the tests first\n" {
 		t.Errorf("CLAUDE.md:\n%s", got)
 	}
 
@@ -1304,14 +1307,14 @@ func TestForgivingPins(t *testing.T) {
 	}
 
 	// Exact duplicate (ignoring case and punctuation): not added again.
-	if msg := sysMsg(t, e.say("PIN: Use pnpm not NPM!", "s1")); !strings.Contains(msg, "already pinned") {
+	if msg := blockMsg(t, e.say("PIN: Use pnpm not NPM!", "s1")); !strings.Contains(msg, "already pinned") {
 		t.Errorf("duplicate PIN: %q", msg)
 	}
 	if got := pinTexts(t, f); len(got) != 1 {
 		t.Errorf("duplicate stored: %v", got)
 	}
 	// PIN! of a plain pin upgrades it instead of storing it twice.
-	if msg := sysMsg(t, e.say("PIN!: use pnpm, not npm", "s1")); !strings.Contains(msg, "now survives /clear") {
+	if msg := blockMsg(t, e.say("PIN!: use pnpm, not npm", "s1")); !strings.Contains(msg, "now survives /clear") {
 		t.Errorf("PIN! upgrade: %q", msg)
 	}
 	if got := pinTexts(t, f); len(got) != 1 || got[0] != "use pnpm, not npm|keep" {
@@ -1320,11 +1323,11 @@ func TestForgivingPins(t *testing.T) {
 
 	// Similar pin: saved, with a note naming the old one; unrelated: no note.
 	e.say("PIN: don't touch the migrations, schema frozen until Friday", "s1")
-	msg = sysMsg(t, e.say("PIN: don't touch migrations until Monday", "s1"))
+	msg = blockMsg(t, e.say("PIN: don't touch migrations until Monday", "s1"))
 	if !strings.Contains(msg, "pinned [") || !strings.Contains(msg, "Similar") || !strings.Contains(msg, "frozen until Friday") || !strings.Contains(msg, "UNPIN: ") {
 		t.Errorf("similar PIN: %q", msg)
 	}
-	if msg := sysMsg(t, e.say("PIN: run migrations before the tests", "s1")); strings.Contains(msg, "Similar") {
+	if msg := blockMsg(t, e.say("PIN: run migrations before the tests", "s1")); strings.Contains(msg, "Similar") {
 		t.Errorf("unrelated pin flagged similar: %q", msg)
 	}
 	if n := len(pinTexts(t, f)); n != 4 {
@@ -1343,7 +1346,7 @@ func TestForgivingPins(t *testing.T) {
 			carryID = p.ID
 		}
 	}
-	if carryID == "" || carryID == strings.Split(strings.Split(sysMsg(t, e.say("PIN: use pnpm, not npm", "s1")), "[")[1], "]")[0] {
+	if carryID == "" || carryID == strings.Split(strings.Split(blockMsg(t, e.say("PIN: use pnpm, not npm", "s1")), "[")[1], "]")[0] {
 		t.Errorf("CARRY and PIN share an id %q", carryID)
 	}
 	e.say("UNPIN: "+carryID, "s1")
@@ -1381,7 +1384,7 @@ func TestForgivingPinsReviewFixes(t *testing.T) {
 	if msg := sysMsg(t, e.say("  \n PIN: indented rule", "s1")); !strings.Contains(msg, "pinned [") {
 		t.Errorf("indented PIN: %q", msg)
 	}
-	if out := e.say("this prompt mentions pin: and PIN: in passing", "s1"); out != "" {
+	if out := e.say("this prompt mentions pin: and PIN: in passing", "s1"); strings.Contains(out, "systemMessage") || strings.Contains(out, `"decision"`) {
 		t.Errorf("prose treated as a command: %q", out)
 	}
 
@@ -1392,7 +1395,7 @@ func TestForgivingPinsReviewFixes(t *testing.T) {
 	if err := os.WriteFile(f, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if msg := sysMsg(t, e.say("PIN!: same text", "s1")); !strings.Contains(msg, "now survives /clear") {
+	if msg := blockMsg(t, e.say("PIN!: same text", "s1")); !strings.Contains(msg, "now survives /clear") {
 		t.Errorf("legacy upgrade: %q", msg)
 	}
 	if got := strings.Join(pinTexts(t, f), ","); got != "same text|keep,same text|carry" {
@@ -1418,7 +1421,7 @@ func TestPinUX(t *testing.T) {
 	}
 
 	// Any case, only at the start.
-	if msg := sysMsg(t, e.say("pin: lower case works", "s1")); !strings.Contains(msg, "pinned [") {
+	if msg := blockMsg(t, e.say("pin: lower case works", "s1")); !strings.Contains(msg, "pinned [") {
 		t.Errorf("lower-case pin: %q", msg)
 	}
 	if !strings.Contains(block(e.say("pins?", "s1")), "lower case works") {
@@ -1485,7 +1488,7 @@ func TestPinUX(t *testing.T) {
 	}
 	e.say("UNPIN: other rule", "s1")
 	// A [ref] that matches no pin is part of a new pin's text.
-	if msg := sysMsg(t, e.say("PIN [nothing like it]: x", "s1")); !strings.Contains(msg, "pinned") {
+	if msg := blockMsg(t, e.say("PIN [nothing like it]: x", "s1")); !strings.Contains(msg, "pinned") {
 		t.Errorf("reword miss: %q", msg)
 	}
 	e.say("UNPIN: last", "s1")
@@ -1568,11 +1571,11 @@ func TestRepoConfigCannotLoosenPrivacy(t *testing.T) {
 func TestDuplicateShowsStoredText(t *testing.T) {
 	e := setup(t)
 	e.say("PIN: don't modify Foo.go", "s1")
-	msg := sysMsg(t, e.say("PIN: don't modify foo.go", "s1"))
+	msg := blockMsg(t, e.say("PIN: don't modify foo.go", "s1"))
 	if !strings.Contains(msg, "already pinned") || !strings.Contains(msg, `"don't modify Foo.go"`) || !strings.Contains(msg, "PIN [") {
 		t.Errorf("duplicate with other case: %q", msg)
 	}
-	if msg := sysMsg(t, e.say("PIN:   don't modify   Foo.go", "s1")); strings.Contains(msg, " as ") {
+	if msg := blockMsg(t, e.say("PIN:   don't modify   Foo.go", "s1")); strings.Contains(msg, " as ") {
 		t.Errorf("spacing-only duplicate: %q", msg)
 	}
 }
@@ -1737,7 +1740,7 @@ func TestLiveReviewFixes(t *testing.T) {
 	}
 
 	// An upper-case verb with a lower-case scope is not a slip.
-	if msg := sysMsg(t, e.say("PIN@repo: repo wide", "s1")); strings.Contains(msg, "Not meant as a pin") {
+	if msg := blockMsg(t, e.say("PIN@repo: repo wide", "s1")); strings.Contains(msg, "Not meant as a pin") {
 		t.Errorf("PIN@repo: got the lower-case hint: %q", msg)
 	}
 
@@ -1767,6 +1770,15 @@ func TestUnreportedClear(t *testing.T) {
 	e2.say("PIN: plain", "u1")
 	if out := e2.inject("clear", "u2"); strings.Contains(out, "not reported") {
 		t.Errorf("no PIN!/CARRY anywhere, yet a warning: %q", out)
+	}
+	// Claude Code: a chat with nothing to hand over is cleared while another chat
+	// has PIN! pins. SessionEnd ran, so the /clear was reported: no warning.
+	e3 := setup(t)
+	e3.say("PIN!: other chat", "o1")
+	e3.say("hello", "c1")
+	cli(e3.end("clear", "c1"), "hook", "session-end")
+	if out := e3.inject("clear", "c2"); strings.Contains(out, "not reported") {
+		t.Errorf("reported empty /clear still warned: %q", out)
 	}
 }
 
