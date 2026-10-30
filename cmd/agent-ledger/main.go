@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/rzaaeeff/agent-ledger/internal/ledger"
 )
@@ -29,9 +30,15 @@ const usage = `usage:
 
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
-func warnFallback(stderr io.Writer) {
+func warnFallback(stderr io.Writer, dir string) {
 	if ledger.LoadConfig("").Key == ledger.KeySession && ledger.SessionFromEnv() == "" {
-		fmt.Fprintln(stderr, "ledger: no session id (CLAUDE_CODE_SESSION_ID, CLAUDE_SESSION_ID and CODEX_THREAD_ID unset); using the branch ledger")
+		// Outside a repository there is no branch to fall back to, so the folder's
+		// sessionless chats share one ledger instead.
+		which := "the branch ledger"
+		if ledger.IsFolder(filepath.Dir(dir)) {
+			which = "the ledger shared by this folder"
+		}
+		fmt.Fprintln(stderr, "ledger: no session id (CLAUDE_CODE_SESSION_ID, CLAUDE_SESSION_ID and CODEX_THREAD_ID unset); using "+which)
 	}
 }
 
@@ -71,7 +78,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, "ledger: unavailable here: "+err.Error())
 			return 0
 		}
-		warnFallback(stderr)
+		warnFallback(stderr, dir)
 		cwd, _ := os.Getwd()
 		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 			fmt.Fprintf(stdout, "ledger: empty (%s)\n", dir)
@@ -99,7 +106,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "preview:", err)
 			return 2
 		}
-		warnFallback(stderr)
+		pdir, _ := ledger.Dir(cwd, "")
+		warnFallback(stderr, pdir)
 		fmt.Fprintln(stdout, text)
 		return 0
 	case "version", "--version", "-v":
