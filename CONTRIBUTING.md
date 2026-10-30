@@ -18,6 +18,8 @@ The behaviour is specified by `cmd/agent-ledger/main_test.go`, which feeds the h
 
 CI runs the tests on Linux, macOS and Windows. File locking and renames behave differently on Windows, so changes to `internal/ledger/files.go` or the lock files deserve extra care.
 
+There are two launchers: `bin/agent-ledger` for bash, and `bin/agent-ledger.cmd` plus `bin/agent-ledger.ps1` for Codex on Windows, which runs hooks through `cmd.exe`. They must behave the same, down to the JSON each prints while the binary is still downloading, so a change to one belongs in the other. The `windows-launcher` job in `ci.yml` is what checks the Windows pair, including the download and its checksum.
+
 It does not run on every push. Start it when you want it:
 
 ```

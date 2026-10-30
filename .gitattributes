@@ -1,0 +1,5 @@
+# The Windows launcher only works if cmd.exe and PowerShell see CRLF, and the bash
+# launcher only works if it stays LF whatever the checkout platform does.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+bin/agent-ledger text eol=lf
