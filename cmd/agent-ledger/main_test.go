@@ -1380,10 +1380,15 @@ func TestForgivingPinsReviewFixes(t *testing.T) {
 		t.Errorf("out-of-range number removed a pin: %d left", n)
 	}
 
-	// Leading spaces before a command are fine; prose mentioning pin: is not a command.
-	if msg := sysMsg(t, e.say("  \n PIN: indented rule", "s1")); !strings.Contains(msg, "pinned [") {
+	// Leading spaces and blank lines before a command are fine, and the command
+	// is still the whole prompt, so it never reaches the agent.
+	if msg := blockMsg(t, e.say("  \n PIN: indented rule", "s1")); !strings.Contains(msg, "pinned [") {
 		t.Errorf("indented PIN: %q", msg)
 	}
+	if msg := sysMsg(t, e.say("\nPIN: another rule\nnow explain cart.py", "s1")); !strings.Contains(msg, "pinned [") {
+		t.Errorf("blank line then a command and a question: %q", msg)
+	}
+	// prose mentioning pin: is not a command.
 	if out := e.say("this prompt mentions pin: and PIN: in passing", "s1"); strings.Contains(out, "systemMessage") || strings.Contains(out, `"decision"`) {
 		t.Errorf("prose treated as a command: %q", out)
 	}
