@@ -1,7 +1,7 @@
 ---
 name: carry
 description: Hand a note to the next chat after /clear, once (agent-ledger).
-argument-hint: "<text>"
+argument-hint: "[text]"
 disable-model-invocation: true
 ---
 This command is handled by the agent-ledger plugin before it reaches you, so you should never see this text.

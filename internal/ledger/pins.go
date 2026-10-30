@@ -270,7 +270,10 @@ func takeCarry(dir string) []Pin {
 // writeLines replaces path with lines, removing it when there are none. Call under the lock.
 func writeLines(path string, lines []string) error {
 	if len(lines) == 0 {
-		return os.Remove(path)
+		if err := retryBusy(func() error { return os.Remove(path) }); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	}
 	return writeReplace(path, []byte(strings.Join(lines, "\n")+"\n"))
 }

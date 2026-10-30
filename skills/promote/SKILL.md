@@ -1,7 +1,7 @@
 ---
 name: promote
 description: Move an agent-ledger pin into CLAUDE.md or AGENTS.md (left uncommitted).
-argument-hint: "<number | id | words | last>"
+argument-hint: "[number | id | words | last]"
 disable-model-invocation: true
 ---
 This command is handled by the agent-ledger plugin before it reaches you, so you should never see this text.
