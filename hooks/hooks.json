@@ -7,6 +7,13 @@
         ]
       }
     ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agent-ledger\" hook user-prompt-expansion", "timeout": 10 }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup|clear|compact|resume|fork",

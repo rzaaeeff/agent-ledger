@@ -140,7 +140,16 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	if h.Prompt == "" || h.bad {
 		return
 	}
-	if _, codex := h.raw["turn_id"]; !codex {
+	// Slash commands are handled by UserPromptExpansion, keyed on the command's
+	// real name; matching "/pin" here would hijack a user's own /pin skill.
+	if strings.HasPrefix(strings.TrimLeft(h.Prompt, " \t\r\n"), "/") {
+		return
+	}
+	_, codex := h.raw["turn_id"]
+	if codex && codexSlash(h, out) {
+		return
+	}
+	if !codex {
 		out = claudeWriter{out}
 	}
 	cfg := LoadConfig(h.Cwd)
