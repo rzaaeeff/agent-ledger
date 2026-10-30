@@ -51,6 +51,13 @@ if [ ! -x "$bin" ]; then
   done
   if [ -z "$data" ]; then msg="HOME is not set"; fail "$@"; fi
   bin="$data/$name"
+  # Outside a hook (e.g. from the Bash tool) $CLAUDE_PLUGIN_DATA is unset: reuse the
+  # copy the hooks downloaded instead of fetching a second one.
+  if [ ! -x "$bin" ] && [ -n "${HOME:-}" ]; then
+    for b in "$HOME"/.claude/plugins/data/*/v"$version"/"$name"; do
+      if [ -x "$b" ]; then bin="$b"; break; fi
+    done
+  fi
 fi
 
 download() {

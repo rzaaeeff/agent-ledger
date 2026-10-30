@@ -203,11 +203,15 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		return
 	}
 	out = &suffixWriter{w: out, suffix: note}
+	carry := cmd.verb == "CARRY" && cmd.ref == ""
 	if _, rest, _ := strings.Cut(prompt, "\n"); strings.TrimSpace(rest) != "" {
 		// More than the command line: don't block, the rest is meant for the agent.
-		out = passWriter{out}
-	}
-	if cmd.verb == "CARRY" && cmd.ref == "" {
+		p := passWriter{w: out}
+		if carry {
+			p.ctx = "agent-ledger: the first line of this prompt (CARRY: ...) is the user's note for the chat after the next /clear. Do not act on it now; the rest of the prompt is for you."
+		}
+		out = p
+	} else if carry {
 		// CARRY is for the chat after /clear: this one must not act on it now.
 		out = blockWriter{out}
 	}
@@ -453,15 +457,25 @@ func (k blockWriter) Write(b []byte) (int, error) {
 
 // passWriter turns a block into a plain systemMessage, so the prompt still
 // reaches the agent.
-type passWriter struct{ w io.Writer }
+// With ctx, it also tells the model ctx.
+type passWriter struct {
+	w   io.Writer
+	ctx string
+}
 
 func (p passWriter) Write(b []byte) (int, error) {
-	var v map[string]string
-	if json.Unmarshal(b, &v) == nil && v["decision"] == "block" {
-		_, err := fmt.Fprintf(p.w, "%s\n", Marshal(map[string]string{"systemMessage": v["reason"]}))
-		return len(b), err
+	var v map[string]any
+	if json.Unmarshal(b, &v) != nil {
+		return p.w.Write(b)
 	}
-	return p.w.Write(b)
+	if v["decision"] == "block" {
+		v = map[string]any{"systemMessage": v["reason"]}
+	}
+	if p.ctx != "" && v["systemMessage"] != nil && v["hookSpecificOutput"] == nil {
+		v["hookSpecificOutput"] = map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": p.ctx}
+	}
+	_, err := fmt.Fprintf(p.w, "%s\n", Marshal(v))
+	return len(b), err
 }
 
 // suffixWriter adds suffix to the systemMessage emitted through it (the redaction note).
@@ -474,11 +488,11 @@ func (s *suffixWriter) Write(b []byte) (int, error) {
 	if s.suffix == "" {
 		return s.w.Write(b)
 	}
-	var v map[string]string
+	var v map[string]any
 	if json.Unmarshal(b, &v) == nil {
 		for _, k := range []string{"systemMessage", "reason"} {
-			if v[k] != "" {
-				v[k] += s.suffix
+			if m, _ := v[k].(string); m != "" {
+				v[k] = m + s.suffix
 				_, err := fmt.Fprintf(s.w, "%s\n", Marshal(v))
 				return len(b), err
 			}
