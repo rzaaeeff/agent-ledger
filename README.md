@@ -158,6 +158,15 @@ On first use the plugin downloads one binary (about 3 MB) for your OS from the G
 
 Your normal prompts are never blocked. Slash commands, `PIN:`, `PINS?`, `LEDGER?`, `CARRY:`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about new, removed or changed pins with your next prompt. In Claude Code the command stays in the input box after the reply; clear it (Ctrl+U) before typing on. If the download fails, the reason goes to `skips.log` in `~/.local/state/agent-ledger/` (or `$XDG_STATE_HOME/agent-ledger/`). If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 
+To update:
+
+```
+claude plugin marketplace update agent-ledger
+claude plugin update agent-ledger
+```
+
+then restart Claude Code. The new binary is fetched on your next prompt, because each version keeps its own copy, so there is nothing else to run. Your pins are untouched by an update. In Codex, run `codex plugin marketplace update agent-ledger` and then the `codex plugin add` line again; it asks you to trust the hooks again.
+
 ## Cost
 
 On a slow 2-core VM each hook takes 40-75 ms plus about 65 ms for the launcher script, so roughly 0.1 s per prompt. After compaction at most 9,000 bytes come back (about 2,000-2,500 tokens). When you pin past 6,000 bytes, the `PIN:` reply warns you.
