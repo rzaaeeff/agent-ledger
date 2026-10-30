@@ -22,8 +22,10 @@ account's permissions. It:
   `PROMOTE:`;
 - deletes ledgers in the current repo that nothing has touched for `prune_days`
   (default 30);
-- makes exactly one network call, ever: downloading its own binary from this
-  repo's GitHub release on first use. Nothing is sent anywhere.
+- makes network calls for one purpose only: fetching its own binary and that
+  release's `checksums.txt` from this repo's GitHub release on first use,
+  retried on failure after 5 minutes and then hourly until it succeeds.
+  Nothing is ever sent anywhere.
 
 Secrets are masked by pattern before anything is written. Pattern matching
 misses things; treat the ledger files as sensitive.

@@ -90,11 +90,27 @@ func writeReplace(path string, data []byte) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := retryBusy(func() error { return os.Rename(tmp, path) }); err != nil {
 		os.Remove(tmp)
 		return err
 	}
 	return nil
+}
+
+// retryBusy runs fn, retrying for up to two seconds. On Windows a rename or
+// remove fails outright while any other handle on the file is open, and Go
+// opens files without FILE_SHARE_DELETE, so an unlocked read elsewhere (a
+// listing, say) is enough to break an otherwise correct locked write.
+func retryBusy(fn func() error) error {
+	err := fn()
+	for wait := time.Millisecond; err != nil && wait < 512*time.Millisecond; wait *= 2 {
+		if os.IsNotExist(err) {
+			return err
+		}
+		time.Sleep(wait)
+		err = fn()
+	}
+	return err
 }
 
 // readLines returns the non-empty lines of path (none if it does not exist).
