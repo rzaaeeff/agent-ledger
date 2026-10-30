@@ -65,6 +65,12 @@ Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 | `UNPIN: <ref>` | removes a pin | |
 | `PROMOTE: <ref>` | moves a pin into `CLAUDE.md` or `AGENTS.md` (see `promote_to`), uncommitted | |
 
+`PIN!:` and `CARRY:` are easy to mix up. A pin is a rule, so it is put back after every compaction until you `UNPIN` it. `CARRY:` is a note about where you left off, delivered once into the next chat and then deleted, which is why `PINS?` never lists it. Pinning "the auth refactor is half done" would still be telling the model that next week, long after it stopped being true.
+
+```
+CARRY: login.py is migrated, signup.py is not. I changed the session table by hand, leave it.
+```
+
 In Claude Code each one is also a slash command: `/pin <text>`, `/pin ! <text>`, `/pin @repo <text>`, `/pins`, `/unpin <ref>`, `/carry <text>`, `/promote <ref>` and `/agent-ledger:help` (type `/agent-ledger:` to see them all; if another skill is already called `/pin`, use `/agent-ledger:pin`). `/pin` alone lists your pins. In Codex the same names work as `$pin`, `$pins`, `$agent-ledger:help` and so on. A slash or `$` command never reaches the model and takes one line; to pin and ask in one message, use the prefix.
 
 A `<ref>` is a number from `PINS?`, a pin's id, `last`, or words from the pin. Prefixes work in any case (`pin:` = `PIN:`) but only at the start of the prompt; "pin:" in the middle of a sentence is ignored. A command is the first line only: the rest of the prompt goes to the agent as usual. Near misses like `PIN; x` or `PIN x` save nothing and tell you so (the prompt still goes to the agent). A lower-case `pin:` saves and offers `UNPIN: last` in case you didn't mean it.

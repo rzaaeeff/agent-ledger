@@ -312,7 +312,8 @@ func HelpText(status string) string {
 Start a prompt with (any case; only at the start):
   PIN: <text>             keep in this chat (dropped on /clear)
   PIN!: <text>            keep in this chat, also across /clear
-  CARRY: <text>           hand to the next chat after /clear, once
+  CARRY: <text>           where you left off, for the next chat after
+                          /clear; delivered once, then deleted (not a pin)
   PIN@branch: / PIN@repo: / PIN@global: <text>   every chat on the branch / in the repo / everywhere
   PIN [ref]: <new text>   reword a pin
   UNPIN: <ref>            remove a pin
