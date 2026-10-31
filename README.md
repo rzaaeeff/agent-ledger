@@ -14,7 +14,7 @@ PIN: don't touch the migrations, the schema is frozen until Friday
 
 After `/compact`, the agent sees that pin again, word for word, and you get a one-line note saying what was restored.
 
-**Status: v0.3, early.** CI runs the tests on Linux, macOS and Windows, and exercises the Windows launcher end to end on `windows-latest`. The agent integration was exercised live on Claude Code 2.1.314 (macOS, Linux, WSL and Windows with Git Bash) and Codex 0.146 (macOS), 0.164 and 0.166 (Linux). Codex on Windows is new and has not had a live run yet. That is a handful of people's runs, not wide use: please report what breaks.
+**Status: v0.3, early.** CI runs the tests on Linux, macOS and Windows, and exercises the Windows launcher end to end on `windows-latest`. The agent integration was exercised live on Claude Code 2.1.314 (macOS, Linux, WSL and Windows with Git Bash) and Codex 0.146 (macOS), 0.164 and 0.166 (Linux), 0.166 and the desktop app's 0.163 (Windows). That is a handful of people's runs, not wide use: please report what breaks.
 
 ## Is it for you?
 
@@ -36,7 +36,7 @@ Claude Code:
 /plugin install agent-ledger@agent-ledger
 ```
 
-Codex (macOS and Linux; experimental):
+Codex (experimental):
 
 ```
 codex plugin marketplace add rzaaeeff/agent-ledger
@@ -117,7 +117,7 @@ Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): C
 | Tool | Status |
 |---|---|
 | Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Works in the CLI (tested live). The others share its hooks and plugins, but the VS Code panel does not show the one-line notes ([#80882](https://github.com/anthropics/claude-code/issues/80882)). On Windows, hooks need Git Bash |
-| Codex: CLI and desktop app | Experimental, macOS, Linux and Windows. On Windows Codex runs hooks with `cmd.exe`, so the plugin ships a `.cmd` and PowerShell launcher beside the bash one; that path is covered by CI on `windows-latest`, not yet by a live run inside Codex, so report what breaks. Codex already keeps recent user messages word for word when it compacts, so the gain is smaller there: mostly old rules and `PIN@branch`/`@repo`/`@global` across `/new` |
+| Codex: CLI and desktop app | Experimental, macOS, Linux and Windows. On Windows Codex runs each hook's `commandWindows` line through PowerShell (or `cmd.exe` when it finds no shell), which starts the plugin's `.cmd` and PowerShell launcher instead of the bash one. Codex already keeps recent user messages word for word when it compacts, so the gain is smaller there: mostly old rules and `PIN@branch`/`@repo`/`@global` across `/new` |
 | Codex IDE extension | Plugins aren't installed there; manual hook setup may work, untested |
 | Claude Code on the web, Codex cloud | No. The ledger is a local folder |
 
@@ -162,7 +162,7 @@ Invalid values are ignored and listed by `agent-ledger config`.
 
 ## How the install works
 
-On first use the plugin downloads one binary (about 3 MB) for your OS from the GitHub release into the plugin's data folder (`~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). Your first prompt waits up to a few seconds for the download. If it isn't done by then, you see "still installing": that prompt is not recorded, and a ledger command is blocked so you can send it again. If the download fails, you are told on each prompt, with the path of a marker file you can delete to retry at once; otherwise it retries after 5 minutes, then hourly. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`. Codex on Windows runs hooks through `cmd.exe` instead, so it uses `bin\agent-ledger.cmd` and a PowerShell script that do the same work; they need Windows PowerShell 5.1 (in Windows since 8.1) and `git`, and nothing from the list above. Claude Code on Windows runs its hooks in Git Bash and keeps to the bash script.
+On first use the plugin downloads one binary (about 3 MB) for your OS from the GitHub release into the plugin's data folder (`~/.local/share/agent-ledger/` when run outside a plugin), and checks its SHA-256 against the release's checksum file (this catches a broken download, not a compromised release). Your first prompt waits up to a few seconds for the download. If it isn't done by then, you see "still installing": that prompt is not recorded, and a ledger command is blocked so you can send it again. If the download fails, you are told on each prompt, with the path of a marker file you can delete to retry at once; otherwise it retries after 5 minutes, then hourly. Needs `bash`, `curl`, `awk`, `git` and `sha256sum` or `shasum`. Codex on Windows runs the `commandWindows` line from `hooks/hooks.json` instead, through PowerShell or `cmd.exe`, so it uses `bin\agent-ledger.cmd` and a PowerShell script that do the same work; they need Windows PowerShell 5.1 (in Windows since 8.1) and `git`, and nothing from the list above. Claude Code on Windows runs its hooks in Git Bash and keeps to the bash script.
 
 Your normal prompts are never blocked. Slash commands, `PIN:`, `PINS?`, `LEDGER?`, `CARRY:`, `UNPIN:`, `PROMOTE:` and rewording are answered without a model turn when the prompt is only that line (with more lines, the prompt goes to the agent as usual); the agent hears about new, removed or changed pins with your next prompt. In Claude Code a prefix command such as `PIN:` stays in the input box after the reply; clear it with Ctrl+C before typing on (Ctrl+U clears one line only, so the rest of a wrapped command would be prepended to your next prompt). Slash commands clear the box themselves. If the download fails, the reason goes to `skips.log` in `~/.local/state/agent-ledger/` (or `$XDG_STATE_HOME/agent-ledger/`). If saving a pin fails, you see "NOT SAVED" and the error goes to `errors.log` in the ledger folder.
 
@@ -177,13 +177,13 @@ then restart Claude Code. The new binary is fetched on your next prompt, because
 
 ## Cost
 
-Measured per prompt: about 16 ms on a 24-core Linux box, 143 ms on Windows, and roughly 0.1 s on a slow 2-core VM (40-75 ms for the hook plus about 65 ms for the launcher script). After compaction at most `budget_bytes` come back, 9,000 by default and 9,500 at the most (about 2,000-2,500 tokens). Over budget, every scope keeps a share, newest pins first, so a chat full of pins cannot push out your repo and global rules. When you pin past 6,000 bytes, the `PIN:` reply warns you and names your budget.
+Measured per prompt: about 16 ms on a 24-core Linux box, 143 ms on Windows in Claude Code, about 0.3 s in Codex on Windows (Codex's own PowerShell start is 80 ms of that), and roughly 0.1 s on a slow 2-core VM (40-75 ms for the hook plus about 65 ms for the launcher script). After compaction at most `budget_bytes` come back, 9,000 by default and 9,500 at the most (about 2,000-2,500 tokens). Over budget, every scope keeps a share, newest pins first, so a chat full of pins cannot push out your repo and global rules. When you pin past 6,000 bytes, the `PIN:` reply warns you and names your budget.
 
 ## Uninstall
 
 Claude Code: `/plugin uninstall agent-ledger@agent-ledger`. It asks whether to delete the plugin's data as well; answering yes removes the downloaded binary, and no keeps it. A Claude Code session still open at that moment downloads the binary again when it ends, because its end-of-chat hook still runs: close your sessions first, or delete the data folder afterwards.
 
-Codex: `codex plugin remove agent-ledger@agent-ledger`, then `rm -rf ~/.codex/plugins/data/agent-ledger-agent-ledger` (Codex leaves the binary behind).
+Codex: `codex plugin remove agent-ledger@agent-ledger`, then `rm -rf ~/.codex/plugins/data/agent-ledger-agent-ledger` (Codex leaves the binary behind; on Windows it is `%USERPROFILE%\.codex\plugins\data\agent-ledger-agent-ledger`).
 
 Your pins and logs are not removed by either. To delete them: `rm -rf ~/.local/state/agent-ledger` (or `$XDG_STATE_HOME/agent-ledger`), and `~/.config/agent-ledger` if you made a config file.
 
