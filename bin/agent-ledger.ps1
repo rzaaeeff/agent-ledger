@@ -92,6 +92,16 @@ function Read-Stdin {
     } catch { return [byte[]]@() }
 }
 
+# Get-FileHash lives in a module Windows PowerShell does not always load, and a
+# download that cannot be checked is a download that cannot be used, so hash the
+# file with .NET and depend on nothing.
+function Get-Sha256([string]$path) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fs = [System.IO.File]::OpenRead($path)
+    try { $bytes = $sha.ComputeHash($fs) } finally { $fs.Close(); $sha.Dispose() }
+    return (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+
 # Invoke-Download fetches one binary and checks it against the release's checksum
 # file. That catches a broken download, not a tampered-with release. It throws on
 # any problem, leaving nothing behind.
@@ -115,8 +125,8 @@ function Invoke-Download([string]$dir, [string]$target, [string]$name, [string]$
         $f = $line.Trim() -split '\s+'
         if ($f.Count -ge 2 -and ($f[1] -eq $name -or $f[1] -eq "*$name")) { $want = $f[0] }
     }
-    $got = (Get-FileHash -LiteralPath (Join-Path $tmp $name) -Algorithm SHA256).Hash
-    if (-not $want -or $want -ne $got) {
+        $got = Get-Sha256 (Join-Path $tmp $name)
+    if (-not $want -or $want.ToLower() -ne $got.ToLower()) {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
         throw "checksum mismatch for $name v$version"
     }
