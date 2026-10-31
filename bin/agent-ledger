@@ -23,11 +23,15 @@ fail() {
 
 # Which agent is running us. Codex does not pass CODEX_THREAD_ID to hook processes
 # (0.146 does not), and PROMOTE: has to know, because Codex never reads CLAUDE.md.
-# The plugin root says it: Codex installs under its own plugins/cache.
-if [ -n "${CLAUDE_PLUGIN_ROOT-}${CLAUDE_PROJECT_DIR-}${CLAUDE_PLUGIN_DATA-}" ]; then
+# The plugin root says it: Codex installs under its own plugins/cache. Codex also
+# exports CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA to plugin hooks, so only
+# CLAUDE_PROJECT_DIR, which Codex never sets, says Claude Code before that check.
+if [ -n "${CLAUDE_PROJECT_DIR-}" ]; then
   AGENT_LEDGER_HOST=claude
 elif [ -n "${CODEX_THREAD_ID-}${CODEX_HOME-}" ] || case "$root" in *"/.codex/"* | *"/codex/"*) true ;; *) false ;; esac then
   AGENT_LEDGER_HOST=codex
+elif [ -n "${CLAUDE_PLUGIN_ROOT-}${CLAUDE_PLUGIN_DATA-}" ]; then
+  AGENT_LEDGER_HOST=claude
 else
   AGENT_LEDGER_HOST=""
 fi

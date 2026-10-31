@@ -19,9 +19,27 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
+      # Codex exports CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA to plugin hooks too,
+      # so the bash launcher must still see Codex: with both files present, PROMOTE:
+      # has to pick AGENTS.md, the one Codex reads. (Windows has its own launcher.)
+      - name: under Codex, PROMOTE picks AGENTS.md
+        if: runner.os != 'Windows'
+        run: |
+          set -eu
+          go build -o "$RUNNER_TEMP/agent-ledger" ./cmd/agent-ledger
+          plug="$RUNNER_TEMP/.codex/plugins/cache/agent-ledger"
+          mkdir -p "$plug/bin" && cp bin/agent-ledger "$plug/bin/" && cp VERSION "$plug/"
+          repo="$RUNNER_TEMP/promote"
+          git init -q "$repo" && echo '# c' > "$repo/CLAUDE.md" && echo '# a' > "$repo/AGENTS.md"
+          export AGENT_LEDGER_BIN="$RUNNER_TEMP/agent-ledger" XDG_STATE_HOME="$RUNNER_TEMP/state"
+          export CLAUDE_PLUGIN_ROOT="$plug" CLAUDE_PLUGIN_DATA="$RUNNER_TEMP/data"
+          hook() { printf '{"prompt":"%s","cwd":"%s","turn_id":"t","session_id":"s"}' "$1" "$repo" | "$plug/bin/agent-ledger" hook user-prompt-submit; }
+          hook 'PIN: promoted rule' >/dev/null
+          out=$(hook 'PROMOTE: promoted rule')
+          case "$out" in *"to AGENTS.md"*) ;; *) echo "PROMOTE did not pick AGENTS.md: $out"; exit 1 ;; esac
 
-  # The Windows launcher cannot be exercised anywhere else: it needs real cmd.exe
-  # PATHEXT resolution, Windows PowerShell 5.1 and a detached background process.
+  # The Windows launcher cannot be exercised anywhere else: it needs Codex's two
+  # Windows hook shells, Windows PowerShell 5.1 and a detached background process.
   windows-launcher:
     runs-on: windows-latest
     steps:
@@ -36,27 +54,34 @@ jobs:
           $v = (Get-Content -LiteralPath VERSION -Raw).Trim()
           go build -ldflags "-X main.version=$v" -o "$env:RUNNER_TEMP\agent-ledger.exe" ./cmd/agent-ledger
 
-      # Codex runs hooks as `cmd.exe /C "<command line>"` with the path from
-      # hooks.json, which has no extension. Everything here rests on cmd finding
-      # agent-ledger.cmd through PATHEXT, so prove that before anything else.
-      - name: cmd.exe resolves the extensionless path
+      # Codex on Windows runs a hook's commandWindows line from hooks.json through
+      # the session's shell: Windows PowerShell's -Command, or cmd.exe /C when it
+      # found none. .github/codex-hook.ps1 does exactly that with the line from
+      # hooks.json, so a command only one of the two shells parses fails here.
+      - name: the hooks.json Windows command runs under both of Codex's shells
         shell: pwsh
         run: |
-          $line = '"' + $PWD.Path + '\bin\agent-ledger" version'
+          . .github\codex-hook.ps1
           $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
-          $out = & cmd.exe /C $line 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$out" }
-          if ($out -notmatch 'agent-ledger \d+\.\d+\.\d+') { throw "unexpected output:`n$out" }
+          $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
+          $cwd = $PWD.Path -replace '\\', '\\'
+          foreach ($sh in 'powershell', 'cmd') {
+            $json = '{"prompt":"PIN: via ' + $sh + '","cwd":"' + $cwd + '","turn_id":"t0","session_id":"s0-' + $sh + '"}'
+            $r = Invoke-CodexHook -Root $PWD.Path -Event user-prompt-submit -Json $json -Shell $sh
+            if ($r.Code -ne 0) { throw "$sh`: exit $($r.Code)`n$($r.Out)$($r.Err)" }
+            if ($r.Out -notmatch '"pinned \[') { throw "$sh`: unexpected output: [$($r.Out)] $($r.Err)" }
+          }
 
       - name: a hook call returns the binary's reply
         shell: pwsh
         run: |
-          $line = '"' + $PWD.Path + '\bin\agent-ledger" hook user-prompt-submit'
+          . .github\codex-hook.ps1
           $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
           $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
           $json = '{"prompt":"PIN: ci check","cwd":"' + ($PWD.Path -replace '\\', '\\') + '","turn_id":"t1","session_id":"s1"}'
-          $out = $json | & cmd.exe /C $line 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$out" }
+          $r = Invoke-CodexHook -Root $PWD.Path -Event user-prompt-submit -Json $json
+          $out = $r.Out
+          if ($r.Code -ne 0) { throw "exit $($r.Code)`n$out" }
           if ($out -notmatch '"pinned \[') {
             # A hook exits 0 whatever happens, so the reason is in skips.log, not here.
             $log = Join-Path $env:LOCALAPPDATA 'agent-ledger\skips.log'
@@ -66,25 +91,46 @@ jobs:
           # The reply has to be JSON the agent can read, not just text that looks right.
           $null = $out | ConvertFrom-Json
 
-      # A non-ASCII pin has to survive the trip through stdin, the .cmd shim and back,
-      # which is where a console code page would corrupt it. The text is written as
-      # JSON escapes so this file stays ASCII whatever checks it out.
+      # A non-ASCII pin has to survive the trip through stdin, Codex's shell, the .cmd
+      # shim and back, which is where a console code page would corrupt it. The text
+      # is written as JSON escapes so this file stays ASCII whatever checks it out.
       - name: a non-ASCII pin round-trips
         shell: pwsh
         run: |
-          $line = '"' + $PWD.Path + '\bin\agent-ledger" hook user-prompt-submit'
+          . .github\codex-hook.ps1
           $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
           $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
           $cwd = $PWD.Path -replace '\\', '\\'
-          $word = -join (0x043F, 0x0440, 0x0438, 0x043C, 0x0435, 0x0440 | ForEach-Object { [char]$_ })
+          $word = -join (0x043F, 0x0440, 0x0438, 0x043C, 0x0435, 0x0440, 0x20, 0x2014, 0x20, 0x4F8B | ForEach-Object { [char]$_ })
           $pin = 'PIN: \u043f\u0440\u0438\u043c\u0435\u0440 \u2014 \u4f8b'
-          $bytes = [Text.Encoding]::UTF8.GetBytes('{"prompt":"' + $pin + '","cwd":"' + $cwd + '","turn_id":"t2","session_id":"s2"}')
-          $tmp = Join-Path $env:RUNNER_TEMP 'in.json'
-          [IO.File]::WriteAllBytes($tmp, $bytes)
-          $null = & cmd.exe /C "$line < `"$tmp`""
-          $json = '{"prompt":"PINS?","cwd":"' + $cwd + '","turn_id":"t3","session_id":"s2"}'
-          $out = $json | & cmd.exe /C $line | Out-String
-          if ($out -notmatch [regex]::Escape($word)) { throw "the pin came back mangled:`n$out" }
+          $null = Invoke-CodexHook -Root $PWD.Path -Event user-prompt-submit -Json ('{"prompt":"' + $pin + '","cwd":"' + $cwd + '","turn_id":"t2","session_id":"s2"}')
+          $r = Invoke-CodexHook -Root $PWD.Path -Event user-prompt-submit -Json ('{"prompt":"PINS?","cwd":"' + $cwd + '","turn_id":"t3","session_id":"s2"}')
+          if ($r.Out -notmatch [regex]::Escape($word)) { throw "the pin came back mangled:`n$($r.Out)" }
+
+      # Codex exports CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA to plugin hooks too, so
+      # they must not make the launcher think it runs under Claude Code: PROMOTE: with
+      # both files present has to pick AGENTS.md, the one Codex reads.
+      - name: under Codex, PROMOTE picks AGENTS.md
+        shell: pwsh
+        run: |
+          . .github\codex-hook.ps1
+          $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
+          $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
+          # Installed where Codex puts plugins, and given the variables Codex sets.
+          $plug = Join-Path $env:RUNNER_TEMP '.codex\plugins\cache\agent-ledger'
+          New-Item -ItemType Directory -Force -Path (Join-Path $plug 'bin') | Out-Null
+          Copy-Item bin\agent-ledger.cmd, bin\agent-ledger.ps1 (Join-Path $plug 'bin')
+          Copy-Item VERSION $plug
+          $env:CLAUDE_PLUGIN_ROOT = $plug
+          $env:CLAUDE_PLUGIN_DATA = "$env:RUNNER_TEMP\data"
+          $repo = Join-Path $env:RUNNER_TEMP 'promote'
+          git init -q $repo
+          Set-Content -LiteralPath (Join-Path $repo 'CLAUDE.md') -Value '# c'
+          Set-Content -LiteralPath (Join-Path $repo 'AGENTS.md') -Value '# a'
+          $cwd = $repo -replace '\\', '\\'
+          $null = Invoke-CodexHook -Root $plug -Event user-prompt-submit -Json ('{"prompt":"PIN: promoted rule","cwd":"' + $cwd + '","turn_id":"t6","session_id":"s6"}')
+          $r = Invoke-CodexHook -Root $plug -Event user-prompt-submit -Json ('{"prompt":"PROMOTE: promoted rule","cwd":"' + $cwd + '","turn_id":"t7","session_id":"s6"}')
+          if ($r.Out -notmatch 'to AGENTS\.md') { throw "PROMOTE did not pick AGENTS.md:`n$($r.Out)" }
 
       # The whole point of the launcher: with no binary anywhere it downloads one
       # from the release, checks it against checksums.txt and uses it. This is the
@@ -94,22 +140,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          . .github\codex-hook.ps1
           # Against the newest published release, since this branch's VERSION may
           # not be released yet.
           $tag = gh release view --repo $env:GITHUB_REPOSITORY --json tagName -q .tagName
-          $plug = Join-Path $env:RUNNER_TEMP 'plugin'
+          # A space in the path, as under C:\Users\Jane Doe: Start-Process does not
+          # quote its arguments, and the detached fetch once died of that.
+          $plug = Join-Path $env:RUNNER_TEMP 'plugin dir'
           New-Item -ItemType Directory -Force -Path (Join-Path $plug 'bin') | Out-Null
           Copy-Item bin\agent-ledger.cmd, bin\agent-ledger.ps1 (Join-Path $plug 'bin')
           Set-Content -LiteralPath (Join-Path $plug 'VERSION') -Value $tag.TrimStart('v')
           $env:AGENT_LEDGER_BIN = ''
-          $env:PLUGIN_DATA = Join-Path $env:RUNNER_TEMP 'data'
+          $env:PLUGIN_DATA = Join-Path $env:RUNNER_TEMP 'data dir'
           $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
-          $line = '"' + $plug + '\bin\agent-ledger" hook user-prompt-submit'
           $cwd = $PWD.Path -replace '\\', '\\'
           $json = '{"prompt":"PIN: downloaded","cwd":"' + $cwd + '","turn_id":"t4","session_id":"s4"}'
 
-          $out = $json | & cmd.exe /C $line | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$out" }
+          $r = Invoke-CodexHook -Root $plug -Event user-prompt-submit -Json $json
+          $out = $r.Out
+          if ($r.Code -ne 0) { throw "exit $($r.Code)`n$out" }
           # Either the fetch beat the six-second wait, or it says so in valid JSON.
           $null = $out | ConvertFrom-Json
 
@@ -131,7 +180,7 @@ jobs:
 
           # The pin is already there from the call above, so either wording means the
           # downloaded binary is the one answering now.
-          $out = $json | & cmd.exe /C $line | Out-String
+          $out = (Invoke-CodexHook -Root $plug -Event user-prompt-submit -Json $json).Out
           if ($out -notmatch 'pinned \[') { throw "the downloaded binary did not run:`n$out" }
 
       # Run by hand with stdin still open, the launcher must not wait for it:
@@ -159,12 +208,14 @@ jobs:
       - name: a broken install still exits 0
         shell: pwsh
         run: |
+          . .github\codex-hook.ps1
           $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\does-not-exist.exe"
           $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
-          $line = '"' + $PWD.Path + '\bin\agent-ledger" hook user-prompt-submit'
           $cwd = $PWD.Path -replace '\\', '\\'
-          $out = ('{"prompt":"hello","cwd":"' + $cwd + '","turn_id":"t5"}') | & cmd.exe /C $line | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "a missing binary failed the session: exit $LASTEXITCODE" }
+          foreach ($sh in 'powershell', 'cmd') {
+            $r = Invoke-CodexHook -Root $PWD.Path -Event user-prompt-submit -Json ('{"prompt":"hello","cwd":"' + $cwd + '","turn_id":"t5"}') -Shell $sh
+            if ($r.Code -ne 0) { throw "a missing binary failed the session under $sh`: exit $($r.Code)" }
+          }
 
   # A dispatched run is not attached to any pull request, so nothing would
   # show there. Post the result as a commit status instead, which does.
