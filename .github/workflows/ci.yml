@@ -129,8 +129,10 @@ jobs:
           $row = Select-String -LiteralPath "$env:RUNNER_TEMP\checksums.txt" -Pattern 'agent-ledger-windows-amd64\.exe'
           if ($row.Line.Split()[0] -ne $got.ToLower()) { throw "checksum mismatch: $got vs $($row.Line)" }
 
+          # The pin is already there from the call above, so either wording means the
+          # downloaded binary is the one answering now.
           $out = $json | & cmd.exe /C $line | Out-String
-          if ($out -notmatch '"pinned \[') { throw "the downloaded binary did not run:`n$out" }
+          if ($out -notmatch 'pinned \[') { throw "the downloaded binary did not run:`n$out" }
 
       # Run by hand with stdin still open, the launcher must not wait for it:
       # `agent-ledger status` in a terminal would hang.
