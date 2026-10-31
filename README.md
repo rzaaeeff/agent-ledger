@@ -185,7 +185,7 @@ Claude Code: `/plugin uninstall agent-ledger@agent-ledger`. It asks whether to d
 
 Codex: `codex plugin remove agent-ledger@agent-ledger`, then `rm -rf ~/.codex/plugins/data/agent-ledger-agent-ledger` (Codex leaves the binary behind; on Windows it is `%USERPROFILE%\.codex\plugins\data\agent-ledger-agent-ledger`).
 
-Your pins and logs are not removed by either. To delete them: `rm -rf ~/.local/state/agent-ledger` (or `$XDG_STATE_HOME/agent-ledger`), and `~/.config/agent-ledger` if you made a config file.
+Your pins and logs are not removed by either. To delete them: `rm -rf ~/.local/state/agent-ledger` (or `$XDG_STATE_HOME/agent-ledger`), and `~/.config/agent-ledger` if you made a config file. On Windows they are `%LOCALAPPDATA%\agent-ledger` and `%APPDATA%\agent-ledger`.
 
 ## Development
 
