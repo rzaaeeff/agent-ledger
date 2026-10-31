@@ -38,6 +38,64 @@ jobs:
           out=$(hook 'PROMOTE: promoted rule')
           case "$out" in *"to AGENTS.md"*) ;; *) echo "PROMOTE did not pick AGENTS.md: $out"; exit 1 ;; esac
 
+      # A data folder that cannot be written means no download can ever start, so
+      # the launcher must say it is not working rather than "still installing" for
+      # ever (#15). The hook still has to exit 0: a session is never failed.
+      - name: an unwritable data folder says it is not working
+        if: runner.os != 'Windows'
+        run: |
+          set -eu
+          data="$RUNNER_TEMP/ro-data"
+          rm -rf "$data" && mkdir -p "$data" && chmod 555 "$data"
+          state="$RUNNER_TEMP/ro-state"
+          rm -rf "$state" && mkdir -p "$state"
+          # No AGENT_LEDGER_BIN: the point is a binary that is missing and cannot
+          # be fetched. The empty homes keep it from finding another copy.
+          export CLAUDE_PLUGIN_DATA="$data" XDG_STATE_HOME="$state"
+          export CODEX_HOME="$RUNNER_TEMP/no-codex" CLAUDE_CONFIG_DIR="$RUNNER_TEMP/no-claude"
+          json='{"prompt":"PIN: x","cwd":"'"$RUNNER_TEMP"'","session_id":"ro"}'
+          set +e
+          out=$(printf '%s' "$json" | bin/agent-ledger hook user-prompt-submit)
+          rc=$?
+          set -e
+          [ $rc -eq 0 ] || { echo "hook exited $rc, it must never fail a session"; exit 1; }
+          case "$out" in
+            *"still installing"*) echo "said still installing, but nothing is: $out"; exit 1 ;;
+            *"cannot write to"*) ;;
+            *) echo "no note about the unwritable folder: $out"; exit 1 ;;
+          esac
+          grep -q 'cannot write to' "$state/agent-ledger/skips.log" ||
+            { echo "nothing in skips.log, which the note tells you to read"; exit 1; }
+
+      - name: an unwritable data folder says it is not working
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $data = "$env:RUNNER_TEMP\ro-data"
+          Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $data | Out-Null
+          # Read and list, no write: the Windows way to say the same thing. The
+          # runner is an administrator, so deny explicitly rather than trust an
+          # absent entry.
+          icacls $data /inheritance:r /grant:r "$($env:USERNAME):(RX)" | Out-Null
+          icacls $data /deny "$($env:USERNAME):(W)" | Out-Null
+          $state = "$env:RUNNER_TEMP\ro-state"
+          Remove-Item -LiteralPath $state -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $state | Out-Null
+          $env:CLAUDE_PLUGIN_DATA = $data
+          $env:LOCALAPPDATA = $state
+          $env:CODEX_HOME = "$env:RUNNER_TEMP\no-codex"
+          $env:CLAUDE_CONFIG_DIR = "$env:RUNNER_TEMP\no-claude"
+          $json = '{"prompt":"PIN: x","cwd":"' + ($env:RUNNER_TEMP -replace '\\', '\\') + '","session_id":"ro"}'
+          $out = $json | & "$PWD\bin\agent-ledger.cmd" hook user-prompt-submit 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "hook exited $LASTEXITCODE, it must never fail a session`n$out" }
+          if ($out -match 'still installing') { throw "said still installing, but nothing is: $out" }
+          if ($out -notmatch 'cannot write to') { throw "no note about the unwritable folder: $out" }
+          $log = Join-Path $state 'agent-ledger\skips.log'
+          if (-not (Select-String -Path $log -Pattern 'cannot write to' -Quiet)) {
+            throw "nothing in skips.log, which the note tells you to read"
+          }
+
   # The Windows launcher cannot be exercised anywhere else: it needs Codex's two
   # Windows hook shells, Windows PowerShell 5.1 and a detached background process.
   windows-launcher:

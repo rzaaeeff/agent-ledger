@@ -145,7 +145,22 @@ if [ ! -x "$bin" ]; then
       esac
       fail hook
     }
+    # The data folder cannot be written: no download can ever start, so saying
+    # "still installing" would be a lie told on every prompt from now on.
+    unwritable_msg() {
+      msg="$name v$version missing; cannot write to $data"
+      case "${2-}" in
+        user-prompt-submit | user-prompt-expansion | session-start)
+          say "agent-ledger is not working: it cannot write to $data, so it cannot download its binary (see $state/skips.log). Make that folder writable, or point AGENT_LEDGER_BIN at a binary you installed yourself." "${2-}" " once agent-ledger works" ;;
+      esac
+      fail hook
+    }
     [ -f "$failed" ] && failed_msg "$@"
+    # A failed mkdir means either that another prompt holds the lock, which is
+    # harmless, or that the folder cannot be written at all. Only the missing
+    # lock tells the two apart, and the answer is used after the wait below, so
+    # that a lock dropped in between is not mistaken for an unwritable folder.
+    unwritable=""
     if mkdir "$lock" 2>/dev/null; then
       (
         ok=0; download || ok=1
@@ -156,6 +171,8 @@ if [ ! -x "$bin" ]; then
         [ $ok -eq 0 ] || fail hook
       ) </dev/null >/dev/null 2>&1 &
       disown 2>/dev/null
+    elif [ ! -d "$lock" ]; then
+      unwritable=1
     fi
     if [ "${2-}" != session-end ]; then
       for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
@@ -169,6 +186,7 @@ if [ ! -x "$bin" ]; then
       exec "$bin" "$@"
     fi
     [ -f "$failed" ] && failed_msg "$@"
+    [ -n "$unwritable" ] && [ ! -d "$lock" ] && unwritable_msg "$@"
     msg="$name missing; fetching v$version in the background"
     # The hook output must stay valid JSON.
     case "${2-}" in
