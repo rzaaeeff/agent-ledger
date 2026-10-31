@@ -20,10 +20,156 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
+  # The Windows launcher cannot be exercised anywhere else: it needs real cmd.exe
+  # PATHEXT resolution, Windows PowerShell 5.1 and a detached background process.
+  windows-launcher:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      # Stamped with the real version, so the checks below can tell this binary
+      # apart from a downloaded one.
+      - shell: pwsh
+        run: |
+          $v = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          go build -ldflags "-X main.version=$v" -o "$env:RUNNER_TEMP\agent-ledger.exe" ./cmd/agent-ledger
+
+      # Codex runs hooks as `cmd.exe /C "<command line>"` with the path from
+      # hooks.json, which has no extension. Everything here rests on cmd finding
+      # agent-ledger.cmd through PATHEXT, so prove that before anything else.
+      - name: cmd.exe resolves the extensionless path
+        shell: pwsh
+        run: |
+          $line = '"' + $PWD.Path + '\bin\agent-ledger" version'
+          $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
+          $out = & cmd.exe /C $line 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$out" }
+          if ($out -notmatch 'agent-ledger \d+\.\d+\.\d+') { throw "unexpected output:`n$out" }
+
+      - name: a hook call returns the binary's reply
+        shell: pwsh
+        run: |
+          $line = '"' + $PWD.Path + '\bin\agent-ledger" hook user-prompt-submit'
+          $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
+          $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
+          $json = '{"prompt":"PIN: ci check","cwd":"' + ($PWD.Path -replace '\\', '\\') + '","turn_id":"t1","session_id":"s1"}'
+          $out = $json | & cmd.exe /C $line 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$out" }
+          if ($out -notmatch '"pinned \[') {
+            # A hook exits 0 whatever happens, so the reason is in skips.log, not here.
+            $log = Join-Path $env:LOCALAPPDATA 'agent-ledger\skips.log'
+            $why = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Raw } else { 'no skips.log' }
+            throw "unexpected output: [$out]`nskips.log: $why"
+          }
+          # The reply has to be JSON the agent can read, not just text that looks right.
+          $null = $out | ConvertFrom-Json
+
+      # A non-ASCII pin has to survive the trip through stdin, the .cmd shim and back,
+      # which is where a console code page would corrupt it. The text is written as
+      # JSON escapes so this file stays ASCII whatever checks it out.
+      - name: a non-ASCII pin round-trips
+        shell: pwsh
+        run: |
+          $line = '"' + $PWD.Path + '\bin\agent-ledger" hook user-prompt-submit'
+          $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
+          $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
+          $cwd = $PWD.Path -replace '\\', '\\'
+          $word = -join (0x043F, 0x0440, 0x0438, 0x043C, 0x0435, 0x0440 | ForEach-Object { [char]$_ })
+          $pin = 'PIN: \u043f\u0440\u0438\u043c\u0435\u0440 \u2014 \u4f8b'
+          $bytes = [Text.Encoding]::UTF8.GetBytes('{"prompt":"' + $pin + '","cwd":"' + $cwd + '","turn_id":"t2","session_id":"s2"}')
+          $tmp = Join-Path $env:RUNNER_TEMP 'in.json'
+          [IO.File]::WriteAllBytes($tmp, $bytes)
+          $null = & cmd.exe /C "$line < `"$tmp`""
+          $json = '{"prompt":"PINS?","cwd":"' + $cwd + '","turn_id":"t3","session_id":"s2"}'
+          $out = $json | & cmd.exe /C $line | Out-String
+          if ($out -notmatch [regex]::Escape($word)) { throw "the pin came back mangled:`n$out" }
+
+      # The whole point of the launcher: with no binary anywhere it downloads one
+      # from the release, checks it against checksums.txt and uses it. This is the
+      # only place the detached fetch and Windows PowerShell's TLS default are real.
+      - name: it downloads and verifies the binary
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Against the newest published release, since this branch's VERSION may
+          # not be released yet.
+          $tag = gh release view --repo $env:GITHUB_REPOSITORY --json tagName -q .tagName
+          $plug = Join-Path $env:RUNNER_TEMP 'plugin'
+          New-Item -ItemType Directory -Force -Path (Join-Path $plug 'bin') | Out-Null
+          Copy-Item bin\agent-ledger.cmd, bin\agent-ledger.ps1 (Join-Path $plug 'bin')
+          Set-Content -LiteralPath (Join-Path $plug 'VERSION') -Value $tag.TrimStart('v')
+          $env:AGENT_LEDGER_BIN = ''
+          $env:PLUGIN_DATA = Join-Path $env:RUNNER_TEMP 'data'
+          $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
+          $line = '"' + $plug + '\bin\agent-ledger" hook user-prompt-submit'
+          $cwd = $PWD.Path -replace '\\', '\\'
+          $json = '{"prompt":"PIN: downloaded","cwd":"' + $cwd + '","turn_id":"t4","session_id":"s4"}'
+
+          $out = $json | & cmd.exe /C $line | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$out" }
+          # Either the fetch beat the six-second wait, or it says so in valid JSON.
+          $null = $out | ConvertFrom-Json
+
+          $want = Join-Path $env:PLUGIN_DATA "$tag\agent-ledger-windows-amd64.exe"
+          $deadline = (Get-Date).AddSeconds(120)
+          while (-not (Test-Path -LiteralPath $want) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 2
+          }
+          if (-not (Test-Path -LiteralPath $want)) {
+            Get-Content -LiteralPath "$env:LOCALAPPDATA\agent-ledger\skips.log" -ErrorAction SilentlyContinue
+            throw "the background fetch never produced $want"
+          }
+
+          # It is only verified if the file the launcher kept matches the release.
+          gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern checksums.txt --dir $env:RUNNER_TEMP
+          $got = (Get-FileHash -LiteralPath $want -Algorithm SHA256).Hash
+          $row = Select-String -LiteralPath "$env:RUNNER_TEMP\checksums.txt" -Pattern 'agent-ledger-windows-amd64\.exe'
+          if ($row.Line.Split()[0] -ne $got.ToLower()) { throw "checksum mismatch: $got vs $($row.Line)" }
+
+          # The pin is already there from the call above, so either wording means the
+          # downloaded binary is the one answering now.
+          $out = $json | & cmd.exe /C $line | Out-String
+          if ($out -notmatch 'pinned \[') { throw "the downloaded binary did not run:`n$out" }
+
+      # Run by hand with stdin still open, the launcher must not wait for it:
+      # `agent-ledger status` in a terminal would hang.
+      - name: a run by hand does not wait on stdin
+        shell: pwsh
+        run: |
+          $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = 'cmd.exe'
+          $psi.Arguments = '/C "' + $PWD.Path + '\bin\agent-ledger" version'
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardInput = $true
+          $psi.RedirectStandardOutput = $true
+          $p = [System.Diagnostics.Process]::Start($psi)
+          # Stdin is deliberately left open and empty.
+          if (-not $p.WaitForExit(30000)) {
+            $p.Kill()
+            throw 'it waited on an open stdin'
+          }
+          $out = $p.StandardOutput.ReadToEnd()
+          if ($out -notmatch 'agent-ledger \d+\.\d+\.\d+') { throw "unexpected output:`n$out" }
+
+      # A hook that cannot work must never stop the session, whatever goes wrong.
+      - name: a broken install still exits 0
+        shell: pwsh
+        run: |
+          $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\does-not-exist.exe"
+          $env:LOCALAPPDATA = "$env:RUNNER_TEMP\state"
+          $line = '"' + $PWD.Path + '\bin\agent-ledger" hook user-prompt-submit'
+          $cwd = $PWD.Path -replace '\\', '\\'
+          $out = ('{"prompt":"hello","cwd":"' + $cwd + '","turn_id":"t5"}') | & cmd.exe /C $line | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "a missing binary failed the session: exit $LASTEXITCODE" }
+
   # A dispatched run is not attached to any pull request, so nothing would
   # show there. Post the result as a commit status instead, which does.
   report:
-    needs: test
+    needs: [test, windows-launcher]
     if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     permissions:
@@ -32,15 +178,16 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           RESULT: ${{ needs.test.result }}
+          LAUNCHER: ${{ needs.windows-launcher.result }}
           URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -eu
-          if [ "$RESULT" = success ]; then
+          if [ "$RESULT" = success ] && [ "$LAUNCHER" = success ]; then
             state=success
-            text="all three platforms passed"
+            text="all three platforms and the Windows launcher passed"
           else
             state=failure
-            text="$RESULT on at least one platform"
+            text="tests $RESULT, Windows launcher $LAUNCHER"
           fi
           gh api "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
             -f state="$state" -f context=ci -f description="$text" -f target_url="$URL"
