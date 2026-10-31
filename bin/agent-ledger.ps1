@@ -303,15 +303,28 @@ function Say-Failed {
     Fail "$script:name v$script:version missing; last download failed, retrying in $script:waitMin minutes"
 }
 
+function Say-Unwritable {
+    $state = Get-StateDir
+    if ($script:event -eq 'user-prompt-submit' -or $script:event -eq 'user-prompt-expansion' -or $script:event -eq 'session-start') {
+        Say "agent-ledger is not working: it cannot write to $script:data, so it cannot download its binary (see $state\skips.log). Make that folder writable, or point AGENT_LEDGER_BIN at a binary you installed yourself." ' once agent-ledger works'
+    }
+    Fail "$script:name v$script:version missing; cannot write to $script:data"
+}
+
 if ($failedItem) { Say-Failed }
 
 # Creating the lock folder is the claim: if it is already there, another prompt is
-# fetching and this one only waits.
+# fetching and this one only waits. A failure with no lock to show for it means the
+# folder cannot be written at all, so no download can ever start; that answer is
+# used after the wait below, so a lock dropped in between is not mistaken for it.
 $haveLock = $false
+$unwritable = $false
 try {
     New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null
     $haveLock = $true
-} catch {}
+} catch {
+    if (-not (Test-Path -LiteralPath $lock)) { $unwritable = $true }
+}
 if ($haveLock) {
     try {
         $self = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -341,6 +354,7 @@ if ($failedItem) {
     if ($failedItem.Length -gt 0) { $waitMin = 60 }
     Say-Failed
 }
+if ($unwritable -and -not (Test-Path -LiteralPath $lock)) { Say-Unwritable }
 switch ($event) {
     'user-prompt-submit' { Say 'agent-ledger is still installing (one-time download); this prompt was not recorded.' ' in a few seconds' }
     'user-prompt-expansion' { Say 'agent-ledger is still installing (one-time download); this prompt was not recorded.' ' in a few seconds' }
