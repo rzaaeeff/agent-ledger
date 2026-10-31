@@ -311,9 +311,10 @@ try {
 if ($haveLock) {
     try {
         $self = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-        Start-Process -FilePath $self -WindowStyle Hidden -ArgumentList @(
-            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath,
-            '--fetch', $data, $bin, $name) | Out-Null
+        # Start-Process joins -ArgumentList with spaces and quotes nothing, so a path
+        # under a profile like C:\Users\Jane Doe would split; quote each path here.
+        $fetchArgs = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" --fetch "{1}" "{2}" {3}' -f $PSCommandPath, $data, $bin, $name
+        Start-Process -FilePath $self -WindowStyle Hidden -ArgumentList $fetchArgs | Out-Null
     } catch {
         # Nothing is fetching after all, so drop the claim and let the next prompt try.
         Write-Skip "could not start the background download: $($_.Exception.Message)"
