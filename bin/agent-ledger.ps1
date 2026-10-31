@@ -12,6 +12,14 @@ $argv = @($args | ForEach-Object { [string]$_ })
 $mode = if ($argv.Count -ge 1) { $argv[0] } else { '' }
 $event = if ($argv.Count -ge 2) { $argv[1] } else { '' }
 
+# Windows PowerShell reads a redirected stdin into $input before the script runs, which
+# leaves [Console]::OpenStandardInput() empty, so take it from there instead. $input
+# belongs to the script scope, so it has to be read here rather than in a function, and
+# it is read through Get-Variable: writing $input anywhere in the file makes the host
+# hold the stream open at exit, which hangs `agent-ledger status` in a terminal.
+$stdinLines = @()
+if ($mode -eq 'hook') { $stdinLines = @(Get-Variable -Name input -ValueOnly) }
+
 # Everything this writes is JSON for the agent, so hold stdout to UTF-8 rather than
 # the console's code page. A redirected handle refuses the change on some hosts,
 # which is harmless: the binary writes its own output on an inherited handle.
@@ -66,6 +74,17 @@ function Run-Binary([string]$path, $stdin) {
 }
 
 function Read-Stdin {
+    if ($script:stdinLines.Count -gt 0) {
+        # The host has already decoded these bytes with its input encoding, so encoding
+        # the text again the same way gives the original bytes back. Both code pages
+        # Windows uses here map every byte to a character, so nothing is lost.
+        $enc = $null
+        try { $enc = [Console]::InputEncoding } catch {}
+        if (-not $enc) { $enc = [System.Text.Encoding]::Default }
+        # A hook payload is one line of JSON; a newline inside it would not be valid
+        # JSON anyway, so joining with one is safe.
+        try { return $enc.GetBytes((($script:stdinLines | ForEach-Object { [string]$_ }) -join "`n")) } catch { return [byte[]]@() }
+    }
     try {
         $ms = New-Object System.IO.MemoryStream
         [Console]::OpenStandardInput().CopyTo($ms)

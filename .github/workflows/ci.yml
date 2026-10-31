@@ -48,23 +48,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$out" }
           if ($out -notmatch 'agent-ledger \d+\.\d+\.\d+') { throw "unexpected output:`n$out" }
 
-      - name: PROBE stdin readers
-        shell: pwsh
-        run: |
-          $probe = @'
-          $r = @()
-          try { $a = @($input); $r += "input:" + ($a.Count) + ":" + ($a -join '|') } catch { $r += "input:ERR:$_" }
-          try {
-            $ms = New-Object System.IO.MemoryStream
-            [Console]::OpenStandardInput().CopyTo($ms)
-            $r += "console:" + $ms.Length + ":" + ([Text.Encoding]::UTF8.GetString($ms.ToArray()))
-          } catch { $r += "console:ERR:$_" }
-          $r -join "`n"
-          '@
-          $p = Join-Path $env:RUNNER_TEMP 'probe.ps1'
-          Set-Content -LiteralPath $p -Value $probe
-          'hello-stdin' | & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $p
-
       - name: a hook call returns the binary's reply
         shell: pwsh
         run: |
@@ -78,10 +61,7 @@ jobs:
             # A hook exits 0 whatever happens, so the reason is in skips.log, not here.
             $log = Join-Path $env:LOCALAPPDATA 'agent-ledger\skips.log'
             $why = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Raw } else { 'no skips.log' }
-            # Run the script directly too, to tell a shim problem from a script one.
-            $direct = $json | & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-              -File "$PWD\bin\agent-ledger.ps1" hook user-prompt-submit 2>&1 | Out-String
-            throw "unexpected output: [$out]`nskips.log: $why`ndirect: [$direct]"
+            throw "unexpected output: [$out]`nskips.log: $why"
           }
           # The reply has to be JSON the agent can read, not just text that looks right.
           $null = $out | ConvertFrom-Json
@@ -151,6 +131,27 @@ jobs:
 
           $out = $json | & cmd.exe /C $line | Out-String
           if ($out -notmatch '"pinned \[') { throw "the downloaded binary did not run:`n$out" }
+
+      # Run by hand with stdin still open, the launcher must not wait for it:
+      # `agent-ledger status` in a terminal would hang.
+      - name: a run by hand does not wait on stdin
+        shell: pwsh
+        run: |
+          $env:AGENT_LEDGER_BIN = "$env:RUNNER_TEMP\agent-ledger.exe"
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = 'cmd.exe'
+          $psi.Arguments = '/C "' + $PWD.Path + '\bin\agent-ledger" version'
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardInput = $true
+          $psi.RedirectStandardOutput = $true
+          $p = [System.Diagnostics.Process]::Start($psi)
+          # Stdin is deliberately left open and empty.
+          if (-not $p.WaitForExit(30000)) {
+            $p.Kill()
+            throw 'it waited on an open stdin'
+          }
+          $out = $p.StandardOutput.ReadToEnd()
+          if ($out -notmatch 'agent-ledger \d+\.\d+\.\d+') { throw "unexpected output:`n$out" }
 
       # A hook that cannot work must never stop the session, whatever goes wrong.
       - name: a broken install still exits 0
