@@ -163,10 +163,14 @@ if ($mode -eq '--fetch') {
 }
 
 # Which agent is running us: PROMOTE: has to know, because Codex never reads CLAUDE.md.
-if ($env:CLAUDE_PLUGIN_ROOT -or $env:CLAUDE_PROJECT_DIR -or $env:CLAUDE_PLUGIN_DATA) {
+# Codex also exports CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA to plugin hooks, so only
+# CLAUDE_PROJECT_DIR, which Codex never sets, says Claude Code before the Codex check.
+if ($env:CLAUDE_PROJECT_DIR) {
     $env:AGENT_LEDGER_HOST = 'claude'
 } elseif ($env:CODEX_THREAD_ID -or $env:CODEX_HOME -or $root -match '[\\/]\.?codex[\\/]') {
     $env:AGENT_LEDGER_HOST = 'codex'
+} elseif ($env:CLAUDE_PLUGIN_ROOT -or $env:CLAUDE_PLUGIN_DATA) {
+    $env:AGENT_LEDGER_HOST = 'claude'
 } else {
     $env:AGENT_LEDGER_HOST = ''
 }
