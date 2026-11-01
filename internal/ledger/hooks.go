@@ -165,8 +165,19 @@ func pinned(w io.Writer, dir, msg, verb string, pass bool, news string) {
 }
 
 // block stops the prompt: the user sees msg, the model gets no turn.
+// replyNote repeats a blocked command's reply as a session note as well. Some
+// clients show a hook's systemMessage but not a blocked prompt's reason, so the
+// reply never arrives: the Claude iOS app driving a session by remote control is
+// one (#19). It is off by default because a client that shows both then shows the
+// reply twice. Set by the hook that is running, read by block.
+var replyNote bool
+
 func block(w io.Writer, msg string) {
-	fmt.Fprintf(w, "%s\n", Marshal(map[string]string{"decision": "block", "reason": msg}))
+	v := map[string]any{"decision": "block", "reason": msg}
+	if replyNote {
+		v["systemMessage"] = msg
+	}
+	fmt.Fprintf(w, "%s\n", Marshal(v))
 }
 
 // debug logs one line per hook event to <root>/hooks.debug.log when
@@ -242,6 +253,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		out = claudeWriter{out}
 	}
 	cfg := LoadConfig(h.Cwd)
+	replyNote = cfg.ReplyNote == "on"
 	dir, err := DirFor(cfg, h.Cwd, h.SessionID)
 	if err != nil {
 		// A folder with no repository gets its own ledger, so the only way here is

@@ -63,6 +63,9 @@ type slashOut struct {
 
 func (s slashOut) block(msg string) {
 	v := map[string]any{"decision": "block", "reason": msg}
+	if replyNote {
+		v["systemMessage"] = msg
+	}
 	if s.event != "" {
 		v["hookSpecificOutput"] = map[string]any{"hookEventName": s.event, "suppressOriginalPrompt": true}
 	}
@@ -116,6 +119,7 @@ func HookUserPromptExpansion(h HookInput, out io.Writer) {
 	if !ok {
 		return
 	}
+	replyNote = LoadConfig(h.Cwd).ReplyNote == "on"
 	s := slashOut{out, "UserPromptExpansion"}
 	if strings.ContainsAny(strings.TrimSpace(args), "\r\n") {
 		s.block(slashMultiLine("/agent-ledger:" + verb))
@@ -139,6 +143,7 @@ func codexSlash(h HookInput, out io.Writer) bool {
 	}
 	verb := strings.ToLower(m[2])
 	prompt, _ := slashPrompt(verb, q[len(m[0]):])
+	replyNote = LoadConfig(h.Cwd).ReplyNote == "on"
 	s := slashOut{out, ""}
 	if strings.ContainsAny(strings.TrimSpace(q), "\r\n") {
 		s.block(slashMultiLine("$" + verb))
