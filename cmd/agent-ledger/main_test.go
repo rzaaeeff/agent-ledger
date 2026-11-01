@@ -587,48 +587,6 @@ func TestClear(t *testing.T) {
 	}
 }
 
-// Some clients show a hook's systemMessage but not a blocked prompt's reason, so
-// a command reply never arrives there (#19). reply_note repeats it as a note.
-func TestReplyNote(t *testing.T) {
-	e := setup(t)
-	has := func(out string) (bool, bool) {
-		var v map[string]any
-		if json.Unmarshal([]byte(strings.TrimSpace(out)), &v) != nil {
-			t.Fatalf("not one JSON object: %q", out)
-		}
-		r, _ := v["reason"].(string)
-		m, _ := v["systemMessage"].(string)
-		if r != "" && m != "" && r != m {
-			t.Errorf("the note must repeat the reply, not reword it: %q vs %q", r, m)
-		}
-		return r != "", m != ""
-	}
-	out, _, _ := cli(e.prompt("PINS?", "s1"), "hook", "user-prompt-submit")
-	if r, m := has(out); !r || m {
-		t.Errorf("off by default: reason %v, note %v", r, m)
-	}
-	writeFile(t, filepath.Join(e.repo, ".agent-ledger.json"), `{"reply_note": "on"}`)
-	out, _, _ = cli(e.prompt("PINS?", "s1"), "hook", "user-prompt-submit")
-	if r, m := has(out); !r || !m {
-		t.Errorf("on: reason %v, note %v", r, m)
-	}
-	// Blocking is what keeps the reply off the model; a note must not undo it.
-	var v map[string]any
-	json.Unmarshal([]byte(strings.TrimSpace(out)), &v)
-	if v["decision"] != "block" {
-		t.Errorf("the prompt must still be blocked: %q", out)
-	}
-	if h, ok := v["hookSpecificOutput"].(map[string]any); ok && h["additionalContext"] != nil {
-		t.Errorf("the model must still get nothing: %q", out)
-	}
-	// A slash command answers before the prompt handler runs, so it reads the key itself.
-	out, _, _ = cli(m{"cwd": e.repo, "session_id": "s1", "command_name": "agent-ledger:pins",
-		"command_source": "plugin", "command_args": ""}, "hook", "user-prompt-expansion")
-	if r, mm := has(out); !r || !mm {
-		t.Errorf("slash reply: reason %v, note %v", r, mm)
-	}
-}
-
 func TestPrune(t *testing.T) {
 	e := setup(t)
 	e.say("keep me", "s1")

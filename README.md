@@ -116,7 +116,7 @@ Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): C
 
 | Tool | Status |
 |---|---|
-| Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Works in the CLI (tested live). The others share its hooks and plugins, but the VS Code panel does not show the one-line notes ([#80882](https://github.com/anthropics/claude-code/issues/80882)), and the iOS app driving a session by remote control shows the note after compaction but not the replies to `PIN:` or `PINS?` ([#19](https://github.com/rzaaeeff/agent-ledger/issues/19), `reply_note: on` works around it); the pins are saved either way. On Windows, hooks need Git Bash |
+| Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Works in the CLI (tested live). The others share its hooks and plugins, but the VS Code panel does not show the one-line notes ([#80882](https://github.com/anthropics/claude-code/issues/80882)), and the iOS app driving a session by remote control does not show the replies to `PIN:`, `PINS?` and the rest, because Claude Code does not send a blocked prompt's reply to a remote client ([#19](https://github.com/rzaaeeff/agent-ledger/issues/19)). The pins are saved either way. On Windows, hooks need Git Bash |
 | Codex: CLI and desktop app | Experimental, macOS, Linux and Windows. On Windows Codex runs each hook's `commandWindows` line through PowerShell (or `cmd.exe` when it finds no shell), which starts the plugin's `.cmd` and PowerShell launcher instead of the bash one. Codex already keeps recent user messages word for word when it compacts, so the gain is smaller there: mostly old rules and `PIN@branch`/`@repo`/`@global` across `/new` |
 | Codex IDE extension | Plugins aren't installed there; manual hook setup may work, untested |
 | Claude Code on the web, Codex cloud | No. The ledger is a local folder |
@@ -156,7 +156,6 @@ Optional. Put it in `~/.config/agent-ledger/config.json` (yours) or `.agent-ledg
 | `prune_days` | days of no activity before a ledger is deleted; `0` = never | `30` |
 | `recent_prompts` | how many come back after compaction (with `logging: all`) | `5` |
 | `budget_bytes` | size limit of what is re-injected, in bytes, at most 9500 (Claude Code keeps 10,000 characters of hook output, Codex about 10,000 bytes). Older prompts are dropped to fit; pins that still don't fit are left out, and the agent is told so at the top | `9000` |
-| `reply_note` | `on`, `off`: also send a command's reply as a session note. Turn it on if replies to `PIN:` or `PINS?` never appear in your client (the iOS app driving a session by remote control is one, [#19](https://github.com/rzaaeeff/agent-ledger/issues/19)). A client that shows both then shows the reply twice | `off` |
 | `promote_to` | file name `PROMOTE:` writes to | the one of `CLAUDE.md`/`AGENTS.md` that exists; with both, `CLAUDE.md` (what Claude Code reads) unless it imports `@AGENTS.md` or you run Codex; with neither, `AGENTS.md` |
 
 Invalid values are ignored and listed by `agent-ledger config`.
