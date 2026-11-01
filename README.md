@@ -65,7 +65,24 @@ Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 | `UNPIN: <ref>` | removes a pin | |
 | `PROMOTE: <ref>` | moves a pin into `CLAUDE.md` or `AGENTS.md` (see `promote_to`), uncommitted; needs a repo | |
 
-`PIN!:` and `CARRY:` are easy to mix up. A pin is a rule, so it is put back after every compaction until you `UNPIN` it. `CARRY:` is a note about where you left off, delivered once into the next chat and then deleted. `PINS?` lists it, marked as a `CARRY` rather than a pin, so you can `UNPIN` it before it is delivered; it is not put back after compaction and it does not count towards the size budget. Pinning "the auth refactor is half done" would still be telling the model that next week, long after it stopped being true.
+`PIN!:` and `CARRY:` are easy to mix up. A pin is a rule, so it is put back after every compaction until you `UNPIN` it. `CARRY:` is a note about where you left off, delivered once into the next chat and then deleted. `PINS?` lists it tagged `carry` rather than `pin`, so you can `UNPIN` it before it is delivered; it is not put back after compaction and it does not count towards the size budget. Pinning "the auth refactor is half done" would still be telling the model that next week, long after it stopped being true.
+
+`PINS?` tags every pin with the command that made it, so the list is the vocabulary you type rather than a description of it:
+
+```
+Pins (shown to you only; the agent did not see this prompt):
+1. [15ceb8] pin @chat    keep it short
+2. [8a2024] pin! @chat   no secrets in logs
+3. [ae353a] carry @chat  left off at the auth refactor
+4. [c1df87] pin @branch  rebase, do not merge
+5. [4924d7] pin @repo    no force pushes (20 days)
+6. [8c1e35] pin @global  reply in British English
+@branch is feat/auth-rewrite.
+pin! survives /clear. carry is delivered once into the next chat, then removed.
+UNPIN: <number, id, words or last> removes one.
+```
+
+A scoped pin is tagged plainly, never `pin!`, because being scoped is what carries it past `/clear`. The branch name is in the last lines rather than in every tag, since `PINS?` only ever lists the branch you are on. Those lines appear only when the list has a tag that needs them.
 
 Pins don't expire on a date, because a date you pick today is a guess about your own future, and a pin that quietly disappears is the one failure you would never notice. Instead `PINS?` shows how old each pin is, and a new chat says something like "2 pins here are older than 14 days. PINS? to review." That note goes to you only, names no pin and changes nothing. Set `nudge_days` to `0` to turn it off, or raise it if you pin things for longer.
 

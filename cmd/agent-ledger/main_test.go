@@ -674,6 +674,76 @@ func TestNudgeOff(t *testing.T) {
 	}
 }
 
+// PINS? tags each pin with the command that made it, so the list is the
+// vocabulary you type rather than a description of it. The branch name is in the
+// legend, not the tag: PINS? only ever lists the branch you are on, so repeating
+// it on every line would only make the text start further right.
+func TestPinsListTags(t *testing.T) {
+	e := setup(t)
+	e.checkout("-b", "feat/a-long-branch-name")
+	for _, p := range []string{"PIN: chat rule", "PIN!: sticky rule", "CARRY: handover",
+		"PIN@branch: branch rule", "PIN@repo: repo rule", "PIN@global: global rule"} {
+		e.say(p, "s1")
+	}
+	out := blockMsg(t, e.say("PINS?", "s1"))
+	for _, want := range []string{"pin @chat    chat rule", "pin! @chat   sticky rule",
+		"carry @chat  handover", "pin @branch  branch rule", "pin @repo    repo rule",
+		"pin @global  global rule"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "a-long-branch-name  ") {
+		t.Errorf("the branch name must not pad every line:\n%s", out)
+	}
+	if !strings.Contains(out, "@branch is feat/a-long-branch-name.") {
+		t.Errorf("the branch name belongs in the legend:\n%s", out)
+	}
+	// A tag is short, so what it does is said once, and only when it is in the list.
+	if !strings.Contains(out, "pin! survives /clear") || !strings.Contains(out, "carry is delivered once") {
+		t.Errorf("legend missing:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "1. ") && len(line) > 80 {
+			t.Errorf("a pin line must stay readable on a narrow screen: %q", line)
+		}
+	}
+
+	// Only a chat pin is marked "!": a scoped pin outlives /clear by being scoped,
+	// so marking it would suggest the two are different kinds of thing.
+	e2 := setup(t)
+	e2.say("PIN!@repo: scoped and sticky", "s2")
+	out2 := blockMsg(t, e2.say("PINS?", "s2"))
+	if !strings.Contains(out2, "pin @repo") || strings.Contains(out2, "pin! @repo") {
+		t.Errorf("a scoped pin is tagged plainly:\n%s", out2)
+	}
+	if strings.Contains(out2, "survives /clear") || strings.Contains(out2, "@branch is") {
+		t.Errorf("the legend must explain only the tags in the list:\n%s", out2)
+	}
+}
+
+// Codex starts a chat it cannot link to the one it replaced, so "pin! survives
+// /clear" would be a lie there. CodexClearNote says so already, once.
+func TestPinsListTagsCodex(t *testing.T) {
+	e := setup(t)
+	codex := func(p string) string {
+		out, _, _ := cli(m{"cwd": e.repo, "session_id": "c1", "turn_id": "t", "prompt": p}, "hook", "user-prompt-submit")
+		return blockMsg(t, out)
+	}
+	codex("PIN!: sticky rule")
+	codex("CARRY: handover")
+	out := codex("PINS?")
+	if !strings.Contains(out, "pin! @chat") || !strings.Contains(out, "carry @chat") {
+		t.Errorf("tags are the same under Codex:\n%s", out)
+	}
+	if strings.Contains(out, "survives /clear") {
+		t.Errorf("Codex must not be promised a /clear handover:\n%s", out)
+	}
+	if n := strings.Count(out, "do not arrive after /clear"); n != 1 {
+		t.Errorf("the Codex caveat must be given exactly once, got %d:\n%s", n, out)
+	}
+}
+
 func TestPrune(t *testing.T) {
 	e := setup(t)
 	e.say("keep me", "s1")

@@ -263,6 +263,25 @@ func pinAge(ts string) string {
 	}
 }
 
+// pinTag is the pin's own command, as the user would type it: the verb and the
+// scope. It is deliberately the vocabulary of the commands rather than a
+// description, so the list teaches what to type next. The current ledger is
+// "@chat"; a scoped pin always outlives /clear, so only a chat pin is marked "!".
+func pinTag(p located) string {
+	verb := "pin"
+	switch {
+	case p.Life == LifeCarry:
+		verb = "carry"
+	case p.Life == LifeKeep && p.Scope == "":
+		verb = "pin!"
+	}
+	scope := p.Scope
+	if scope == "" {
+		scope = "chat"
+	}
+	return verb + " @" + scope
+}
+
 // PinsList is the text PINS? shows the user (never the model).
 func PinsList(pins []located, codex bool) string {
 	if len(pins) == 0 {
@@ -272,34 +291,69 @@ func PinsList(pins []located, codex bool) string {
 		}
 		return "No pins here. Start a prompt with PIN: (or send " + cmd + " <text>) to add one."
 	}
+	// The tag is padded so the pins line up and can be read down the page. Only
+	// the tags actually present are measured, so a short list stays tight, and
+	// no tag is long enough to push the text off a narrow screen: the branch name
+	// is not in the tag, because PINS? only ever lists the branch you are on.
+	tags := make([]string, len(pins))
+	width := 0
+	for i, p := range pins {
+		tags[i] = pinTag(p)
+		if n := len([]rune(tags[i])); n > width {
+			width = n
+		}
+	}
 	var b strings.Builder
 	b.WriteString("Pins (shown to you only; the agent did not see this prompt):")
 	for i, p := range pins {
-		where := codexWhere(p.Where, codex)
+		pad := strings.Repeat(" ", width-len([]rune(tags[i])))
+		fmt.Fprintf(&b, "\n%d. [%s] %s%s  %s", i+1, p.ID, tags[i], pad, p.Text)
 		if age := pinAge(p.TS); age != "" {
-			where += ", " + age
+			fmt.Fprintf(&b, " (%s)", age)
 		}
-		fmt.Fprintf(&b, "\n%d. [%s] %s (%s)", i+1, p.ID, p.Text, where)
+	}
+	for _, line := range pinLegend(pins, codex) {
+		b.WriteString("\n" + line)
 	}
 	b.WriteString("\nUNPIN: <number, id, words or last> removes one.")
 	return b.String()
 }
 
-// codexWhere keeps a scope label from promising what Codex cannot do: it starts a
-// chat it cannot link to the one it replaced, so a PIN! and a CARRY both end with
-// /clear there. Saying "kept across /clear" next to a note saying the opposite is
-// worse than saying neither.
-func codexWhere(where string, codex bool) string {
-	if !codex {
-		return where
+// pinLegend explains the tags that are actually in the list, and nothing else. A
+// tag is short because it is the command, so what the command does has to be said
+// somewhere; saying it only when it applies keeps a one-pin list to one line.
+func pinLegend(pins []located, codex bool) []string {
+	var keep, carry bool
+	branch := ""
+	for _, p := range pins {
+		switch {
+		case p.Life == LifeCarry:
+			carry = true
+		case p.Life == LifeKeep && p.Scope == "":
+			keep = true
+		}
+		if p.Scope == ScopeBranch {
+			branch = strings.TrimPrefix(p.Where, "branch ")
+		}
+	}
+	var out []string
+	if branch != "" {
+		out = append(out, "@branch is "+branch+".")
 	}
 	switch {
-	case strings.HasSuffix(where, ", kept across /clear"):
-		return strings.TrimSuffix(where, ", kept across /clear") + ", kept across /clear in Claude Code only"
-	case strings.HasPrefix(where, "CARRY, "):
-		return "CARRY, which Codex cannot hand to the next chat"
+	// Under Codex, /clear starts a chat it cannot link to the one it replaced, so
+	// pin! and carry both end there and "survives /clear" would be a lie. Saying so
+	// is CodexClearNote's job, which the caller appends; saying it twice is worse
+	// than once.
+	case codex:
+	case keep && carry:
+		out = append(out, "pin! survives /clear. carry is delivered once into the next chat, then removed.")
+	case keep:
+		out = append(out, "pin! survives /clear; a plain chat pin does not.")
+	case carry:
+		out = append(out, "carry is delivered once into the next chat, then removed.")
 	}
-	return where
+	return out
 }
 
 // CodexClearNote warns that Codex starts a chat it cannot link to the one it
