@@ -70,19 +70,20 @@ Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 `PINS?` tags every pin with the command that made it, so the list is the vocabulary you type rather than a description of it:
 
 ```
-Pins (shown to you only; the agent did not see this prompt):
-1. [15ceb8] pin @chat    keep it short
-2. [8a2024] pin! @chat   no secrets in logs
-3. [ae353a] carry @chat  left off at the auth refactor
-4. [c1df87] pin @branch  rebase, do not merge
-5. [4924d7] pin @repo    no force pushes (20 days)
-6. [8c1e35] pin @global  reply in British English
+Pins and carries (shown to you only; the agent did not see this prompt):
+1. [pin   @chat   15ceb8]      keep it short
+2. [pin!  @chat   8a2024]      no secrets in logs
+3. [carry @chat   ae353a]      left off at the auth refactor
+4. [pin   @branch c1df87]      rebase, do not merge
+5. [pin   @repo   4924d7 20d]  no force pushes
+6. [pin   @global 8c1e35]      reply in British English
+20d is how long ago a pin was made; today's pins have no age.
 @branch is feat/auth-rewrite.
 pin! survives /clear. carry is delivered once into the next chat, then removed.
 UNPIN: <number, id, words or last> removes one.
 ```
 
-A scoped pin is tagged plainly, never `pin!`, because being scoped is what carries it past `/clear`. The branch name is in the last lines rather than in every tag, since `PINS?` only ever lists the branch you are on. Those lines appear only when the list has a tag that needs them.
+What a pin is comes before what it says, because you read this list to decide what to remove. The id and the age go last: both are bookkeeping, and after the text they would read as your own words. A scoped pin is tagged plainly, never `pin!`, because being scoped is what carries it past `/clear`. The branch name is in the lines below rather than in every row, since `PINS?` only ever lists the branch you are on. Every column is only as wide as the values actually in the list, and the lines below appear only when something in the list needs them, so four plain pins print four plain rows and nothing else.
 
 Pins don't expire on a date, because a date you pick today is a guess about your own future, and a pin that quietly disappears is the one failure you would never notice. Instead `PINS?` shows how old each pin is, and a new chat says something like "2 pins here are older than 14 days. PINS? to review." That note goes to you only, names no pin and changes nothing. Set `nudge_days` to `0` to turn it off, or raise it if you pin things for longer.
 

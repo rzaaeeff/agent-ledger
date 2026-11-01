@@ -263,23 +263,35 @@ func pinAge(ts string) string {
 	}
 }
 
-// pinTag is the pin's own command, as the user would type it: the verb and the
-// scope. It is deliberately the vocabulary of the commands rather than a
-// description, so the list teaches what to type next. The current ledger is
-// "@chat"; a scoped pin always outlives /clear, so only a chat pin is marked "!".
-func pinTag(p located) string {
-	verb := "pin"
+// pinVerb and pinScope are the pin's own command, as the user would type it. The
+// list is deliberately the vocabulary of the commands rather than a description
+// of them, so it teaches what to type next. The current ledger is "@chat"; a
+// scoped pin outlives /clear by being scoped, so only a chat pin is marked "!".
+func pinVerb(p located) string {
 	switch {
 	case p.Life == LifeCarry:
-		verb = "carry"
+		return "carry"
 	case p.Life == LifeKeep && p.Scope == "":
-		verb = "pin!"
+		return "pin!"
 	}
-	scope := p.Scope
-	if scope == "" {
-		scope = "chat"
+	return "pin"
+}
+
+func pinScope(p located) string {
+	if p.Scope == "" {
+		return "@chat"
 	}
-	return verb + " @" + scope
+	return "@" + p.Scope
+}
+
+// shortAge is the age in the smallest form that is still unambiguous next to
+// nothing else numeric. It sits with the rest of the bookkeeping rather than
+// after the text, where it would read as the user's own words.
+func shortAge(ts string) string {
+	if a := pinAge(ts); a != "" {
+		return strings.TrimSuffix(strings.TrimSuffix(a, " days"), " day") + "d"
+	}
+	return ""
 }
 
 // PinsList is the text PINS? shows the user (never the model).
@@ -291,38 +303,63 @@ func PinsList(pins []located, codex bool) string {
 		}
 		return "No pins here. Start a prompt with PIN: (or send " + cmd + " <text>) to add one."
 	}
-	// The tag is padded so the pins line up and can be read down the page. Only
-	// the tags actually present are measured, so a short list stays tight, and
-	// no tag is long enough to push the text off a narrow screen: the branch name
-	// is not in the tag, because PINS? only ever lists the branch you are on.
-	tags := make([]string, len(pins))
-	width := 0
+	// What a pin is comes before what it says: you read this list to decide what
+	// to remove, and the verb and scope are what you decide on. The id is a handle
+	// you type afterwards, so it goes last inside the brackets, and the age with
+	// it: both are bookkeeping, and after the text they would read as the user's
+	// own words. Every column is padded to the widest value actually present, so
+	// a short list stays tight and nothing is padded for a case that is not here.
+	// The branch name is in the legend rather than in a tag, because PINS? only
+	// ever lists the branch you are on; without that the text would start too far
+	// right to survive a narrow screen.
+	verbs, scopes, ages := make([]string, len(pins)), make([]string, len(pins)), make([]string, len(pins))
+	var vw, sw, aw int
+	runes := func(s string) int { return len([]rune(s)) }
 	for i, p := range pins {
-		tags[i] = pinTag(p)
-		if n := len([]rune(tags[i])); n > width {
-			width = n
+		verbs[i], scopes[i], ages[i] = pinVerb(p), pinScope(p), shortAge(p.TS)
+		vw, sw, aw = max(vw, runes(verbs[i])), max(sw, runes(scopes[i])), max(aw, runes(ages[i]))
+	}
+	pad := func(s string, w int) string { return s + strings.Repeat(" ", w-runes(s)) }
+	var cells []string
+	for i, p := range pins {
+		c := pad(verbs[i], vw) + " " + pad(scopes[i], sw) + " " + p.ID
+		if aw > 0 {
+			c = strings.TrimRight(c+" "+pad(ages[i], aw), " ")
 		}
+		cells = append(cells, "["+c+"]")
+	}
+	cw := 0
+	for _, c := range cells {
+		cw = max(cw, runes(c))
 	}
 	var b strings.Builder
-	b.WriteString("Pins (shown to you only; the agent did not see this prompt):")
+	b.WriteString(pinsHeading(pins) + " (shown to you only; the agent did not see this prompt):")
 	for i, p := range pins {
-		pad := strings.Repeat(" ", width-len([]rune(tags[i])))
-		fmt.Fprintf(&b, "\n%d. [%s] %s%s  %s", i+1, p.ID, tags[i], pad, p.Text)
-		if age := pinAge(p.TS); age != "" {
-			fmt.Fprintf(&b, " (%s)", age)
-		}
+		fmt.Fprintf(&b, "\n%d. %s  %s", i+1, pad(cells[i], cw), p.Text)
 	}
-	for _, line := range pinLegend(pins, codex) {
+	for _, line := range pinLegend(pins, codex, aw > 0) {
 		b.WriteString("\n" + line)
 	}
 	b.WriteString("\nUNPIN: <number, id, words or last> removes one.")
 	return b.String()
 }
 
+// pinsHeading avoids calling a CARRY a pin: it is a note delivered once into the
+// next chat and then deleted, which is the opposite of a rule that keeps coming
+// back, and the two are already easy to mix up.
+func pinsHeading(pins []located) string {
+	for _, p := range pins {
+		if p.Life == LifeCarry {
+			return "Pins and carries"
+		}
+	}
+	return "Pins"
+}
+
 // pinLegend explains the tags that are actually in the list, and nothing else. A
 // tag is short because it is the command, so what the command does has to be said
 // somewhere; saying it only when it applies keeps a one-pin list to one line.
-func pinLegend(pins []located, codex bool) []string {
+func pinLegend(pins []located, codex, aged bool) []string {
 	var keep, carry bool
 	branch := ""
 	for _, p := range pins {
@@ -337,6 +374,9 @@ func pinLegend(pins []located, codex bool) []string {
 		}
 	}
 	var out []string
+	if aged {
+		out = append(out, "20d is how long ago a pin was made; today's pins have no age.")
+	}
 	if branch != "" {
 		out = append(out, "@branch is "+branch+".")
 	}

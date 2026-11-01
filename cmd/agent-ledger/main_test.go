@@ -600,7 +600,7 @@ func TestPinAgeAndNudge(t *testing.T) {
 	e.say("PIN@repo: old rule", "s1")
 	e.say("PIN@repo: fresh rule", "s1")
 
-	if out := e.say("PINS?", "s1"); strings.Contains(out, "days)") {
+	if out := e.say("PINS?", "s1"); strings.Contains(out, "0d]") || strings.Contains(out, "20d is") {
 		t.Errorf("a pin made today must not be given an age: %q", out)
 	}
 
@@ -626,11 +626,15 @@ func TestPinAgeAndNudge(t *testing.T) {
 	}
 
 	out := e.say("PINS?", "s1")
-	if !strings.Contains(out, "20 days") {
+	if !strings.Contains(out, "f5a597 20d]") {
 		t.Errorf("PINS? must show a pin's age: %q", out)
 	}
-	if strings.Count(out, " days") != 1 {
+	if strings.Count(out, "d]") != 1 {
 		t.Errorf("only the old pin has an age to show: %q", out)
+	}
+	// The age is bookkeeping: after the text it would read as the user's words.
+	if strings.Contains(out, "old rule (") || strings.Contains(out, "old rule 20") {
+		t.Errorf("the age must not trail the pin's text: %q", out)
 	}
 
 	// The nudge goes to the user, never to the model, and names no pin.
@@ -686,9 +690,9 @@ func TestPinsListTags(t *testing.T) {
 		e.say(p, "s1")
 	}
 	out := blockMsg(t, e.say("PINS?", "s1"))
-	for _, want := range []string{"pin @chat    chat rule", "pin! @chat   sticky rule",
-		"carry @chat  handover", "pin @branch  branch rule", "pin @repo    repo rule",
-		"pin @global  global rule"} {
+	for _, want := range []string{
+		"[pin   @chat   ", "[pin!  @chat   ", "[carry @chat   ",
+		"[pin   @branch ", "[pin   @repo   ", "[pin   @global "} {
 		if !strings.Contains(out, want) {
 			t.Errorf("want %q in:\n%s", want, out)
 		}
@@ -700,6 +704,10 @@ func TestPinsListTags(t *testing.T) {
 		t.Errorf("the branch name belongs in the legend:\n%s", out)
 	}
 	// A tag is short, so what it does is said once, and only when it is in the list.
+	// A carry is not a pin, and the two are already easy to mix up.
+	if !strings.HasPrefix(out, "Pins and carries (") {
+		t.Errorf("a list with a carry must not call itself Pins:\n%s", out)
+	}
 	if !strings.Contains(out, "pin! survives /clear") || !strings.Contains(out, "carry is delivered once") {
 		t.Errorf("legend missing:\n%s", out)
 	}
@@ -714,11 +722,18 @@ func TestPinsListTags(t *testing.T) {
 	e2 := setup(t)
 	e2.say("PIN!@repo: scoped and sticky", "s2")
 	out2 := blockMsg(t, e2.say("PINS?", "s2"))
-	if !strings.Contains(out2, "pin @repo") || strings.Contains(out2, "pin! @repo") {
+	if !strings.Contains(out2, "[pin @repo ") || strings.Contains(out2, "pin! @repo") {
 		t.Errorf("a scoped pin is tagged plainly:\n%s", out2)
 	}
-	if strings.Contains(out2, "survives /clear") || strings.Contains(out2, "@branch is") {
-		t.Errorf("the legend must explain only the tags in the list:\n%s", out2)
+	if strings.Contains(out2, "survives /clear") || strings.Contains(out2, "@branch is") || strings.Contains(out2, "20d is") {
+		t.Errorf("the legend must explain only what is in the list:\n%s", out2)
+	}
+	if !strings.HasPrefix(out2, "Pins (") {
+		t.Errorf("no carry, so no mention of carries:\n%s", out2)
+	}
+	// Nothing is padded for a column that is not here.
+	if strings.Contains(out2, "pin  ") {
+		t.Errorf("one verb needs no verb column:\n%s", out2)
 	}
 }
 
@@ -733,7 +748,7 @@ func TestPinsListTagsCodex(t *testing.T) {
 	codex("PIN!: sticky rule")
 	codex("CARRY: handover")
 	out := codex("PINS?")
-	if !strings.Contains(out, "pin! @chat") || !strings.Contains(out, "carry @chat") {
+	if !strings.Contains(out, "[pin!  @chat ") || !strings.Contains(out, "[carry @chat ") {
 		t.Errorf("tags are the same under Codex:\n%s", out)
 	}
 	if strings.Contains(out, "survives /clear") {
