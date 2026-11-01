@@ -118,7 +118,7 @@ Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): C
 
 | Tool | Status |
 |---|---|
-| Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Works in the CLI (tested live). The others share its hooks and plugins, but the VS Code panel does not show the one-line notes ([#80882](https://github.com/anthropics/claude-code/issues/80882)). On Windows, hooks need Git Bash |
+| Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Works in the CLI (tested live). The others share its hooks and plugins, but the VS Code panel does not show the one-line notes ([#80882](https://github.com/anthropics/claude-code/issues/80882)), and the iOS app driving a session by remote control shows the note after compaction but not the replies to `PIN:` or `PINS?` ([#19](https://github.com/rzaaeeff/agent-ledger/issues/19)); the pins are saved either way. On Windows, hooks need Git Bash |
 | Codex: CLI and desktop app | Experimental, macOS, Linux and Windows. On Windows Codex runs each hook's `commandWindows` line through PowerShell (or `cmd.exe` when it finds no shell), which starts the plugin's `.cmd` and PowerShell launcher instead of the bash one. Codex already keeps recent user messages word for word when it compacts, so the gain is smaller there: mostly old rules and `PIN@branch`/`@repo`/`@global` across `/new` |
 | Codex IDE extension | Plugins aren't installed there; manual hook setup may work, untested |
 | Claude Code on the web, Codex cloud | No. The ledger is a local folder |
