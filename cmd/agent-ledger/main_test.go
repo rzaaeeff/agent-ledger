@@ -489,7 +489,12 @@ func TestCommandsBlockAndCount(t *testing.T) {
 		t.Errorf("calls: %s", msg)
 	}
 	// Parser: first line only, ! after the scope, full-width colon, space before @.
-	e.say("PIN: line one\nnow do the work", "s3")
+	if msg := e.say("PIN: line one\nnow do the work", "s3"); !strings.Contains(msg, "the first line only") {
+		t.Errorf("a multi-line PIN must say only its first line was kept: %q", msg)
+	}
+	if msg := e.say("PIN: line alone", "s3"); strings.Contains(msg, "first line only") {
+		t.Errorf("a one-line PIN must not mention lines: %q", msg)
+	}
 	e.say("PIN@repo!: bang after scope", "s3")
 	e.say("PIN：fullwidth", "s3")
 	e.say("PIN @repo: spaced scope", "s3")
@@ -584,6 +589,173 @@ func TestClear(t *testing.T) {
 	cli(e.end("clear", "long"), "hook", "session-end")
 	if msg := sysMsg(t, e.inject("clear", "long")); strings.Contains(msg, strings.Repeat("q", 301)) || !strings.Contains(msg, "...") {
 		t.Error("long pins must be cut to 300 chars in the clear message")
+	}
+}
+
+// A pin that has stopped being true still steers the model and still costs
+// budget. PINS? shows how old each one is, and startup points out the old ones
+// once, to the user only. Age never deletes or hides anything (#17).
+func TestPinAgeAndNudge(t *testing.T) {
+	e := setup(t)
+	e.say("PIN@repo: old rule", "s1")
+	e.say("PIN@repo: fresh rule", "s1")
+
+	if out := e.say("PINS?", "s1"); strings.Contains(out, "0d]") || strings.Contains(out, "20d is") {
+		t.Errorf("a pin made today must not be given an age: %q", out)
+	}
+
+	// Backdate the first pin by rewriting its timestamp in place.
+	f := filepath.Join(e.dir(ledger.RepoKey), "pinned.jsonl")
+	raw, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().AddDate(0, 0, -20).Format(time.RFC3339Nano)
+	var kept []string
+	for _, ln := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		var p map[string]any
+		if json.Unmarshal([]byte(ln), &p) == nil && p["text"] == "old rule" {
+			p["ts"] = old
+			b, _ := json.Marshal(p)
+			ln = string(b)
+		}
+		kept = append(kept, ln)
+	}
+	if err := os.WriteFile(f, []byte(strings.Join(kept, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := e.say("PINS?", "s1")
+	if !strings.Contains(out, "f5a597 20d]") {
+		t.Errorf("PINS? must show a pin's age: %q", out)
+	}
+	if strings.Count(out, "d]") != 1 {
+		t.Errorf("only the old pin has an age to show: %q", out)
+	}
+	// The age is bookkeeping: after the text it would read as the user's words.
+	if strings.Contains(out, "old rule (") || strings.Contains(out, "old rule 20") {
+		t.Errorf("the age must not trail the pin's text: %q", out)
+	}
+
+	// The nudge goes to the user, never to the model, and names no pin.
+	raw2 := e.injectRaw("startup", "s2")
+	if !strings.Contains(raw2, "1 pin here is older than 14 days") {
+		t.Errorf("startup must point out the old pin: %q", raw2)
+	}
+	if strings.Contains(contextOf(raw2), "older than") {
+		t.Errorf("the model must never be told a pin is old: %q", contextOf(raw2))
+	}
+	if strings.Contains(raw2, "old rule (") {
+		t.Errorf("the nudge must not name pins, PINS? does that: %q", raw2)
+	}
+	// Age hides nothing: the old pin still comes back after compaction.
+	if ctx := e.inject("compact", "s3"); !strings.Contains(ctx, "old rule") {
+		t.Errorf("an old pin must still be restored word for word: %q", ctx)
+	}
+	// Compaction is not a new session, so the nudge does not repeat there.
+	if strings.Contains(e.injectRaw("compact", "s3"), "older than") {
+		t.Error("the nudge is for startup only, not every compaction")
+	}
+}
+
+func TestNudgeOff(t *testing.T) {
+	e := setup(t)
+	e.say("PIN@repo: old rule", "s1")
+	f := filepath.Join(e.dir(ledger.RepoKey), "pinned.jsonl")
+	raw, _ := os.ReadFile(f)
+	var p map[string]any
+	json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &p)
+	p["ts"] = time.Now().AddDate(0, 0, -40).Format(time.RFC3339Nano)
+	b, _ := json.Marshal(p)
+	os.WriteFile(f, append(b, '\n'), 0o600)
+
+	if out := e.injectRaw("startup", "s2"); !strings.Contains(out, "older than") {
+		t.Fatalf("expected a nudge before turning it off: %q", out)
+	}
+	writeFile(t, filepath.Join(e.repo, ".agent-ledger.json"), `{"nudge_days": 0}`)
+	if out := e.injectRaw("startup", "s3"); strings.Contains(out, "older than") {
+		t.Errorf("nudge_days 0 turns the nudge off: %q", out)
+	}
+}
+
+// PINS? tags each pin with the command that made it, so the list is the
+// vocabulary you type rather than a description of it. The branch name is in the
+// legend, not the tag: PINS? only ever lists the branch you are on, so repeating
+// it on every line would only make the text start further right.
+func TestPinsListTags(t *testing.T) {
+	e := setup(t)
+	e.checkout("-b", "feat/a-long-branch-name")
+	for _, p := range []string{"PIN: chat rule", "PIN!: sticky rule", "CARRY: handover",
+		"PIN@branch: branch rule", "PIN@repo: repo rule", "PIN@global: global rule"} {
+		e.say(p, "s1")
+	}
+	out := blockMsg(t, e.say("PINS?", "s1"))
+	for _, want := range []string{
+		"[pin   @chat   ", "[pin!  @chat   ", "[carry @chat   ",
+		"[pin   @branch ", "[pin   @repo   ", "[pin   @global "} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "a-long-branch-name  ") {
+		t.Errorf("the branch name must not pad every line:\n%s", out)
+	}
+	if !strings.Contains(out, "@branch is feat/a-long-branch-name.") {
+		t.Errorf("the branch name belongs in the legend:\n%s", out)
+	}
+	// A tag is short, so what it does is said once, and only when it is in the list.
+	// A carry is not a pin, and the two are already easy to mix up.
+	if !strings.HasPrefix(out, "Pins and carries (") {
+		t.Errorf("a list with a carry must not call itself Pins:\n%s", out)
+	}
+	if !strings.Contains(out, "pin! survives /clear") || !strings.Contains(out, "carry is delivered once") {
+		t.Errorf("legend missing:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "1. ") && len(line) > 80 {
+			t.Errorf("a pin line must stay readable on a narrow screen: %q", line)
+		}
+	}
+
+	// Only a chat pin is marked "!": a scoped pin outlives /clear by being scoped,
+	// so marking it would suggest the two are different kinds of thing.
+	e2 := setup(t)
+	e2.say("PIN!@repo: scoped and sticky", "s2")
+	out2 := blockMsg(t, e2.say("PINS?", "s2"))
+	if !strings.Contains(out2, "[pin @repo ") || strings.Contains(out2, "pin! @repo") {
+		t.Errorf("a scoped pin is tagged plainly:\n%s", out2)
+	}
+	if strings.Contains(out2, "survives /clear") || strings.Contains(out2, "@branch is") || strings.Contains(out2, "20d is") {
+		t.Errorf("the legend must explain only what is in the list:\n%s", out2)
+	}
+	if !strings.HasPrefix(out2, "Pins (") {
+		t.Errorf("no carry, so no mention of carries:\n%s", out2)
+	}
+	// Nothing is padded for a column that is not here.
+	if strings.Contains(out2, "pin  ") {
+		t.Errorf("one verb needs no verb column:\n%s", out2)
+	}
+}
+
+// Codex starts a chat it cannot link to the one it replaced, so "pin! survives
+// /clear" would be a lie there. CodexClearNote says so already, once.
+func TestPinsListTagsCodex(t *testing.T) {
+	e := setup(t)
+	codex := func(p string) string {
+		out, _, _ := cli(m{"cwd": e.repo, "session_id": "c1", "turn_id": "t", "prompt": p}, "hook", "user-prompt-submit")
+		return blockMsg(t, out)
+	}
+	codex("PIN!: sticky rule")
+	codex("CARRY: handover")
+	out := codex("PINS?")
+	if !strings.Contains(out, "[pin!  @chat ") || !strings.Contains(out, "[carry @chat ") {
+		t.Errorf("tags are the same under Codex:\n%s", out)
+	}
+	if strings.Contains(out, "survives /clear") {
+		t.Errorf("Codex must not be promised a /clear handover:\n%s", out)
+	}
+	if n := strings.Count(out, "do not arrive after /clear"); n != 1 {
+		t.Errorf("the Codex caveat must be given exactly once, got %d:\n%s", n, out)
 	}
 }
 

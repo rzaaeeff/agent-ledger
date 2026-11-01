@@ -25,6 +25,7 @@ const (
 	RecentPrompts = 5
 	PromptMax     = 2000
 	PruneDays     = 30
+	NudgeDays     = 14
 )
 
 // HookInput is the hook JSON on stdin; unknown or mistyped fields are ignored.
@@ -469,6 +470,11 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			return
 		}
 		msg := fmt.Sprintf("pinned [%s]%s.", id, where)
+		if pass {
+			// Only the command's own line is stored, so say so rather than let the
+			// lines under it go missing without a word.
+			msg = fmt.Sprintf("pinned [%s]%s, the first line only.", id, where)
+		}
 		if len(similar) > 0 {
 			if len(similar) > 2 {
 				similar = similar[:2]
@@ -755,6 +761,11 @@ func HookSessionStart(h HookInput, out io.Writer) {
 		msg = strings.TrimSpace(msg + fmt.Sprintf(" agent-ledger ignored %s; `agent-ledger config` says why.", ignoredList(cfg.Problems)))
 	}
 	if h.Source == "startup" {
+		if note := oldPinNote(h.Cwd, dir, cfg.NudgeDays); note != "" {
+			msg = strings.TrimSpace(msg + " " + note)
+		}
+	}
+	if h.Source == "startup" {
 		if hint := filepath.Join(root, HintedFile); !fileExists(hint) && MkdirPrivate(root) == nil &&
 			os.WriteFile(hint, nil, 0o600) == nil {
 			msg = strings.TrimSpace(msg + " agent-ledger is on: start a prompt with PIN: to keep a rule through compaction. LEDGER? lists the commands.")
@@ -772,6 +783,41 @@ func HookSessionStart(h HookInput, out io.Writer) {
 		}
 	}
 	startOutput(out, h.Source, text, msg)
+}
+
+// oldPinNote points out pins that have been there a while, once at startup and
+// only to the user: a pin that has stopped being true still steers the model and
+// still costs budget, and nothing else ever mentions it. It never says which, so
+// the user reviews them with PINS?, and nothing is ever deleted or hidden for age.
+func oldPinNote(cwd, dir string, nudgeDays int) string {
+	if nudgeDays <= 0 {
+		return ""
+	}
+	cut := Now().AddDate(0, 0, -nudgeDays)
+	old := 0
+	for _, p := range listPins(cwd, dir, "this chat") {
+		if p.Life == LifeCarry || p.TS == "" {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339Nano, p.TS); err == nil && t.Before(cut) {
+			old++
+		}
+	}
+	switch old {
+	case 0:
+		return ""
+	case 1:
+		return fmt.Sprintf("1 pin here is older than %s. PINS? to review.", days(nudgeDays))
+	default:
+		return fmt.Sprintf("%d pins here are older than %s. PINS? to review.", old, days(nudgeDays))
+	}
+}
+
+func days(n int) string {
+	if n == 1 {
+		return "1 day"
+	}
+	return fmt.Sprintf("%d days", n)
 }
 
 // HintedFile in a repo's ledger root marks that the one-time hint was shown there.

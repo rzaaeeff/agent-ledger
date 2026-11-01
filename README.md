@@ -59,13 +59,33 @@ Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 | `PIN@branch:` | every chat on this branch (refused on `main`, `master`, the default branch, a detached HEAD, and outside a repo) | kept |
 | `PIN@repo:` | every chat in this repo, or in this folder when it is not a repo | kept |
 | `PIN@global:` | every chat, in every repo and every folder | kept |
-| `PINS?` | lists your pins with numbers; only you see it, the agent gets nothing | |
+| `PINS?` | lists your pins with numbers and how old each one is; only you see it, the agent gets nothing | |
 | `LEDGER?` | the cheat sheet and what's stored; only you see it | |
 | `PIN [ref]: <new text>` | rewords a pin; it keeps its scope and lifetime | |
 | `UNPIN: <ref>` | removes a pin | |
 | `PROMOTE: <ref>` | moves a pin into `CLAUDE.md` or `AGENTS.md` (see `promote_to`), uncommitted; needs a repo | |
 
-`PIN!:` and `CARRY:` are easy to mix up. A pin is a rule, so it is put back after every compaction until you `UNPIN` it. `CARRY:` is a note about where you left off, delivered once into the next chat and then deleted. `PINS?` lists it, marked as a `CARRY` rather than a pin, so you can `UNPIN` it before it is delivered; it is not put back after compaction and it does not count towards the size budget. Pinning "the auth refactor is half done" would still be telling the model that next week, long after it stopped being true.
+`PIN!:` and `CARRY:` are easy to mix up. A pin is a rule, so it is put back after every compaction until you `UNPIN` it. `CARRY:` is a note about where you left off, delivered once into the next chat and then deleted. `PINS?` lists it tagged `carry` rather than `pin`, so you can `UNPIN` it before it is delivered; it is not put back after compaction and it does not count towards the size budget. Pinning "the auth refactor is half done" would still be telling the model that next week, long after it stopped being true.
+
+`PINS?` tags every pin with the command that made it, so the list is the vocabulary you type rather than a description of it:
+
+```
+Pins and carries (shown to you only; the agent did not see this prompt):
+1. [pin   @chat   15ceb8]      keep it short
+2. [pin!  @chat   8a2024]      no secrets in logs
+3. [carry @chat   ae353a]      left off at the auth refactor
+4. [pin   @branch c1df87]      rebase, do not merge
+5. [pin   @repo   4924d7 20d]  no force pushes
+6. [pin   @global 8c1e35]      reply in British English
+20d is how long ago a pin was made; today's pins have no age.
+@branch is feat/auth-rewrite.
+pin! survives /clear. carry is delivered once into the next chat, then removed.
+UNPIN: <number, id, words or last> removes one.
+```
+
+What a pin is comes before what it says, because you read this list to decide what to remove. The id and the age go last: both are bookkeeping, and after the text they would read as your own words. A scoped pin is tagged plainly, never `pin!`, because being scoped is what carries it past `/clear`. The branch name is in the lines below rather than in every row, since `PINS?` only ever lists the branch you are on. Every column is only as wide as the values actually in the list, and the lines below appear only when something in the list needs them, so four plain pins print four plain rows and nothing else.
+
+Pins don't expire on a date, because a date you pick today is a guess about your own future, and a pin that quietly disappears is the one failure you would never notice. Instead `PINS?` shows how old each pin is, and a new chat says something like "2 pins here are older than 14 days. PINS? to review." That note goes to you only, names no pin and changes nothing. Set `nudge_days` to `0` to turn it off, or raise it if you pin things for longer.
 
 ```
 CARRY: login.py is migrated, signup.py is not. I changed the session table by hand, leave it.
@@ -73,7 +93,7 @@ CARRY: login.py is migrated, signup.py is not. I changed the session table by ha
 
 In Claude Code each one is also a slash command: `/pin <text>`, `/pin ! <text>`, `/pin @repo <text>`, `/pins`, `/unpin <ref>`, `/carry <text>`, `/promote <ref>` and `/agent-ledger:help` (type `/agent-ledger:` to see them all; if another skill is already called `/pin`, use `/agent-ledger:pin`). `/pin` alone lists your pins. In Codex the same names work as `$pin`, `$pins`, `$agent-ledger:help` and so on; Codex expands the name on the first Enter and sends it on the second. A slash or `$` command never reaches the model, and it has to be the whole message; to pin and ask in one go, use the prefix form instead.
 
-A `<ref>` is a number from `PINS?`, a pin's id, `last`, or words from the pin. Prefixes work in any case (`pin:` = `PIN:`) but only at the start of the prompt; "pin:" in the middle of a sentence is ignored. A command is the first line only: the rest of the prompt goes to the agent as usual. A long or pasted command works too: Claude Code wraps a paste (and anything typed fast enough to look like one) in a `<pasted_content>` block, and a block that is nothing but a command is unwrapped before it is read. A command inside a paste that has your own words around it is left alone, so pasted text cannot pin itself. Near misses like `PIN; x` or `PIN x` save nothing and tell you so (the prompt still goes to the agent). A lower-case `pin:` saves and offers `UNPIN: last` in case you didn't mean it.
+A `<ref>` is a number from `PINS?`, a pin's id, `last`, or words from the pin. Prefixes work in any case (`pin:` = `PIN:`) but only at the start of the prompt; "pin:" in the middle of a sentence is ignored. A command is the first line only: the rest of the prompt goes to the agent as usual, and the reply says "the first line only" so a pasted paragraph never looks like it was all saved. A long or pasted command works too: Claude Code wraps a paste (and anything typed fast enough to look like one) in a `<pasted_content>` block, and a block that is nothing but a command is unwrapped before it is read. A command inside a paste that has your own words around it is left alone, so pasted text cannot pin itself. Near misses like `PIN; x` or `PIN x` save nothing and tell you so (the prompt still goes to the agent). A lower-case `pin:` saves and offers `UNPIN: last` in case you didn't mean it.
 
 Claude Code prefixes every reply to a command with `UserPromptSubmit operation blocked by hook:`, or `UserPromptExpansion operation blocked by hook:` for a slash command; Codex says `Blocked by hook`. Those labels are the agent's and the plugin cannot change them. They mean the command was handled locally and never reached the model. The text after it (`pinned [a1b2]. (2 pins apply here)`) is the reply. Nothing was rejected.
 
@@ -116,7 +136,7 @@ Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): C
 
 | Tool | Status |
 |---|---|
-| Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Works in the CLI (tested live). The others share its hooks and plugins, but the VS Code panel does not show the one-line notes ([#80882](https://github.com/anthropics/claude-code/issues/80882)). On Windows, hooks need Git Bash |
+| Claude Code: CLI, VS Code, JetBrains, desktop Code tab | Works in the CLI (tested live). The others share its hooks and plugins, but the VS Code panel does not show the one-line notes ([#80882](https://github.com/anthropics/claude-code/issues/80882)), and the iOS app driving a session by remote control shows the note after compaction but not the replies to `PIN:` or `PINS?` ([#19](https://github.com/rzaaeeff/agent-ledger/issues/19)); the pins are saved either way. On Windows, hooks need Git Bash |
 | Codex: CLI and desktop app | Experimental, macOS, Linux and Windows. On Windows Codex runs each hook's `commandWindows` line through PowerShell (or `cmd.exe` when it finds no shell), which starts the plugin's `.cmd` and PowerShell launcher instead of the bash one. Codex already keeps recent user messages word for word when it compacts, so the gain is smaller there: mostly old rules and `PIN@branch`/`@repo`/`@global` across `/new` |
 | Codex IDE extension | Plugins aren't installed there; manual hook setup may work, untested |
 | Claude Code on the web, Codex cloud | No. The ledger is a local folder |
@@ -154,6 +174,7 @@ Optional. Put it in `~/.config/agent-ledger/config.json` (yours) or `.agent-ledg
 | `logging` | `all`, `pins-only`, `off` | `pins-only` |
 | `redact` | `on`, `off` | `on` |
 | `prune_days` | days of no activity before a ledger is deleted; `0` = never | `30` |
+| `nudge_days` | how old a pin has to be before a new chat says so once, to you only; `0` = never | `14` |
 | `recent_prompts` | how many come back after compaction (with `logging: all`) | `5` |
 | `budget_bytes` | size limit of what is re-injected, in bytes, at most 9500 (Claude Code keeps 10,000 characters of hook output, Codex about 10,000 bytes). Older prompts are dropped to fit; pins that still don't fit are left out, and the agent is told so at the top | `9000` |
 | `promote_to` | file name `PROMOTE:` writes to | the one of `CLAUDE.md`/`AGENTS.md` that exists; with both, `CLAUDE.md` (what Claude Code reads) unless it imports `@AGENTS.md` or you run Codex; with neither, `AGENTS.md` |

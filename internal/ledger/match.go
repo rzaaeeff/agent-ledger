@@ -243,6 +243,57 @@ func refList(ps []located) string {
 	return strings.Join(out, "; ")
 }
 
+// pinAge is how long ago a pin was made, for PINS?. Empty when the pin has no
+// timestamp (0.1.x wrote none) or was made today, where an age tells you nothing.
+func pinAge(ts string) string {
+	if ts == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return ""
+	}
+	switch d := int(Now().Sub(t).Hours() / 24); {
+	case d < 1:
+		return ""
+	case d == 1:
+		return "1 day"
+	default:
+		return fmt.Sprintf("%d days", d)
+	}
+}
+
+// pinVerb and pinScope are the pin's own command, as the user would type it. The
+// list is deliberately the vocabulary of the commands rather than a description
+// of them, so it teaches what to type next. The current ledger is "@chat"; a
+// scoped pin outlives /clear by being scoped, so only a chat pin is marked "!".
+func pinVerb(p located) string {
+	switch {
+	case p.Life == LifeCarry:
+		return "carry"
+	case p.Life == LifeKeep && p.Scope == "":
+		return "pin!"
+	}
+	return "pin"
+}
+
+func pinScope(p located) string {
+	if p.Scope == "" {
+		return "@chat"
+	}
+	return "@" + p.Scope
+}
+
+// shortAge is the age in the smallest form that is still unambiguous next to
+// nothing else numeric. It sits with the rest of the bookkeeping rather than
+// after the text, where it would read as the user's own words.
+func shortAge(ts string) string {
+	if a := pinAge(ts); a != "" {
+		return strings.TrimSuffix(strings.TrimSuffix(a, " days"), " day") + "d"
+	}
+	return ""
+}
+
 // PinsList is the text PINS? shows the user (never the model).
 func PinsList(pins []located, codex bool) string {
 	if len(pins) == 0 {
@@ -252,30 +303,97 @@ func PinsList(pins []located, codex bool) string {
 		}
 		return "No pins here. Start a prompt with PIN: (or send " + cmd + " <text>) to add one."
 	}
-	var b strings.Builder
-	b.WriteString("Pins (shown to you only; the agent did not see this prompt):")
+	// What a pin is comes before what it says: you read this list to decide what
+	// to remove, and the verb and scope are what you decide on. The id is a handle
+	// you type afterwards, so it goes last inside the brackets, and the age with
+	// it: both are bookkeeping, and after the text they would read as the user's
+	// own words. Every column is padded to the widest value actually present, so
+	// a short list stays tight and nothing is padded for a case that is not here.
+	// The branch name is in the legend rather than in a tag, because PINS? only
+	// ever lists the branch you are on; without that the text would start too far
+	// right to survive a narrow screen.
+	verbs, scopes, ages := make([]string, len(pins)), make([]string, len(pins)), make([]string, len(pins))
+	var vw, sw, aw int
+	runes := func(s string) int { return len([]rune(s)) }
 	for i, p := range pins {
-		fmt.Fprintf(&b, "\n%d. [%s] %s (%s)", i+1, p.ID, p.Text, codexWhere(p.Where, codex))
+		verbs[i], scopes[i], ages[i] = pinVerb(p), pinScope(p), shortAge(p.TS)
+		vw, sw, aw = max(vw, runes(verbs[i])), max(sw, runes(scopes[i])), max(aw, runes(ages[i]))
+	}
+	pad := func(s string, w int) string { return s + strings.Repeat(" ", w-runes(s)) }
+	var cells []string
+	for i, p := range pins {
+		c := pad(verbs[i], vw) + " " + pad(scopes[i], sw) + " " + p.ID
+		if aw > 0 {
+			c = strings.TrimRight(c+" "+pad(ages[i], aw), " ")
+		}
+		cells = append(cells, "["+c+"]")
+	}
+	cw := 0
+	for _, c := range cells {
+		cw = max(cw, runes(c))
+	}
+	var b strings.Builder
+	b.WriteString(pinsHeading(pins) + " (shown to you only; the agent did not see this prompt):")
+	for i, p := range pins {
+		fmt.Fprintf(&b, "\n%d. %s  %s", i+1, pad(cells[i], cw), p.Text)
+	}
+	for _, line := range pinLegend(pins, codex, aw > 0) {
+		b.WriteString("\n" + line)
 	}
 	b.WriteString("\nUNPIN: <number, id, words or last> removes one.")
 	return b.String()
 }
 
-// codexWhere keeps a scope label from promising what Codex cannot do: it starts a
-// chat it cannot link to the one it replaced, so a PIN! and a CARRY both end with
-// /clear there. Saying "kept across /clear" next to a note saying the opposite is
-// worse than saying neither.
-func codexWhere(where string, codex bool) string {
-	if !codex {
-		return where
+// pinsHeading avoids calling a CARRY a pin: it is a note delivered once into the
+// next chat and then deleted, which is the opposite of a rule that keeps coming
+// back, and the two are already easy to mix up.
+func pinsHeading(pins []located) string {
+	for _, p := range pins {
+		if p.Life == LifeCarry {
+			return "Pins and carries"
+		}
+	}
+	return "Pins"
+}
+
+// pinLegend explains the tags that are actually in the list, and nothing else. A
+// tag is short because it is the command, so what the command does has to be said
+// somewhere; saying it only when it applies keeps a one-pin list to one line.
+func pinLegend(pins []located, codex, aged bool) []string {
+	var keep, carry bool
+	branch := ""
+	for _, p := range pins {
+		switch {
+		case p.Life == LifeCarry:
+			carry = true
+		case p.Life == LifeKeep && p.Scope == "":
+			keep = true
+		}
+		if p.Scope == ScopeBranch {
+			branch = strings.TrimPrefix(p.Where, "branch ")
+		}
+	}
+	var out []string
+	if aged {
+		out = append(out, "20d is how long ago a pin was made; today's pins have no age.")
+	}
+	if branch != "" {
+		out = append(out, "@branch is "+branch+".")
 	}
 	switch {
-	case strings.HasSuffix(where, ", kept across /clear"):
-		return strings.TrimSuffix(where, ", kept across /clear") + ", kept across /clear in Claude Code only"
-	case strings.HasPrefix(where, "CARRY, "):
-		return "CARRY, which Codex cannot hand to the next chat"
+	// Under Codex, /clear starts a chat it cannot link to the one it replaced, so
+	// pin! and carry both end there and "survives /clear" would be a lie. Saying so
+	// is CodexClearNote's job, which the caller appends; saying it twice is worse
+	// than once.
+	case codex:
+	case keep && carry:
+		out = append(out, "pin! survives /clear. carry is delivered once into the next chat, then removed.")
+	case keep:
+		out = append(out, "pin! survives /clear; a plain chat pin does not.")
+	case carry:
+		out = append(out, "carry is delivered once into the next chat, then removed.")
 	}
-	return where
+	return out
 }
 
 // CodexClearNote warns that Codex starts a chat it cannot link to the one it
