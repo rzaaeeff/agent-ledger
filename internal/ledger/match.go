@@ -243,6 +243,26 @@ func refList(ps []located) string {
 	return strings.Join(out, "; ")
 }
 
+// pinAge is how long ago a pin was made, for PINS?. Empty when the pin has no
+// timestamp (0.1.x wrote none) or was made today, where an age tells you nothing.
+func pinAge(ts string) string {
+	if ts == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return ""
+	}
+	switch d := int(Now().Sub(t).Hours() / 24); {
+	case d < 1:
+		return ""
+	case d == 1:
+		return "1 day"
+	default:
+		return fmt.Sprintf("%d days", d)
+	}
+}
+
 // PinsList is the text PINS? shows the user (never the model).
 func PinsList(pins []located, codex bool) string {
 	if len(pins) == 0 {
@@ -255,7 +275,11 @@ func PinsList(pins []located, codex bool) string {
 	var b strings.Builder
 	b.WriteString("Pins (shown to you only; the agent did not see this prompt):")
 	for i, p := range pins {
-		fmt.Fprintf(&b, "\n%d. [%s] %s (%s)", i+1, p.ID, p.Text, codexWhere(p.Where, codex))
+		where := codexWhere(p.Where, codex)
+		if age := pinAge(p.TS); age != "" {
+			where += ", " + age
+		}
+		fmt.Fprintf(&b, "\n%d. [%s] %s (%s)", i+1, p.ID, p.Text, where)
 	}
 	b.WriteString("\nUNPIN: <number, id, words or last> removes one.")
 	return b.String()

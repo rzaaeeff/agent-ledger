@@ -489,7 +489,12 @@ func TestCommandsBlockAndCount(t *testing.T) {
 		t.Errorf("calls: %s", msg)
 	}
 	// Parser: first line only, ! after the scope, full-width colon, space before @.
-	e.say("PIN: line one\nnow do the work", "s3")
+	if msg := e.say("PIN: line one\nnow do the work", "s3"); !strings.Contains(msg, "the first line only") {
+		t.Errorf("a multi-line PIN must say only its first line was kept: %q", msg)
+	}
+	if msg := e.say("PIN: line alone", "s3"); strings.Contains(msg, "first line only") {
+		t.Errorf("a one-line PIN must not mention lines: %q", msg)
+	}
 	e.say("PIN@repo!: bang after scope", "s3")
 	e.say("PIN：fullwidth", "s3")
 	e.say("PIN @repo: spaced scope", "s3")
@@ -584,6 +589,88 @@ func TestClear(t *testing.T) {
 	cli(e.end("clear", "long"), "hook", "session-end")
 	if msg := sysMsg(t, e.inject("clear", "long")); strings.Contains(msg, strings.Repeat("q", 301)) || !strings.Contains(msg, "...") {
 		t.Error("long pins must be cut to 300 chars in the clear message")
+	}
+}
+
+// A pin that has stopped being true still steers the model and still costs
+// budget. PINS? shows how old each one is, and startup points out the old ones
+// once, to the user only. Age never deletes or hides anything (#17).
+func TestPinAgeAndNudge(t *testing.T) {
+	e := setup(t)
+	e.say("PIN@repo: old rule", "s1")
+	e.say("PIN@repo: fresh rule", "s1")
+
+	if out := e.say("PINS?", "s1"); strings.Contains(out, "days)") {
+		t.Errorf("a pin made today must not be given an age: %q", out)
+	}
+
+	// Backdate the first pin by rewriting its timestamp in place.
+	f := filepath.Join(e.dir(ledger.RepoKey), "pinned.jsonl")
+	raw, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().AddDate(0, 0, -20).Format(time.RFC3339Nano)
+	var kept []string
+	for _, ln := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		var p map[string]any
+		if json.Unmarshal([]byte(ln), &p) == nil && p["text"] == "old rule" {
+			p["ts"] = old
+			b, _ := json.Marshal(p)
+			ln = string(b)
+		}
+		kept = append(kept, ln)
+	}
+	if err := os.WriteFile(f, []byte(strings.Join(kept, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := e.say("PINS?", "s1")
+	if !strings.Contains(out, "20 days") {
+		t.Errorf("PINS? must show a pin's age: %q", out)
+	}
+	if strings.Count(out, " days") != 1 {
+		t.Errorf("only the old pin has an age to show: %q", out)
+	}
+
+	// The nudge goes to the user, never to the model, and names no pin.
+	raw2 := e.injectRaw("startup", "s2")
+	if !strings.Contains(raw2, "1 pin here is older than 14 days") {
+		t.Errorf("startup must point out the old pin: %q", raw2)
+	}
+	if strings.Contains(contextOf(raw2), "older than") {
+		t.Errorf("the model must never be told a pin is old: %q", contextOf(raw2))
+	}
+	if strings.Contains(raw2, "old rule (") {
+		t.Errorf("the nudge must not name pins, PINS? does that: %q", raw2)
+	}
+	// Age hides nothing: the old pin still comes back after compaction.
+	if ctx := e.inject("compact", "s3"); !strings.Contains(ctx, "old rule") {
+		t.Errorf("an old pin must still be restored word for word: %q", ctx)
+	}
+	// Compaction is not a new session, so the nudge does not repeat there.
+	if strings.Contains(e.injectRaw("compact", "s3"), "older than") {
+		t.Error("the nudge is for startup only, not every compaction")
+	}
+}
+
+func TestNudgeOff(t *testing.T) {
+	e := setup(t)
+	e.say("PIN@repo: old rule", "s1")
+	f := filepath.Join(e.dir(ledger.RepoKey), "pinned.jsonl")
+	raw, _ := os.ReadFile(f)
+	var p map[string]any
+	json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &p)
+	p["ts"] = time.Now().AddDate(0, 0, -40).Format(time.RFC3339Nano)
+	b, _ := json.Marshal(p)
+	os.WriteFile(f, append(b, '\n'), 0o600)
+
+	if out := e.injectRaw("startup", "s2"); !strings.Contains(out, "older than") {
+		t.Fatalf("expected a nudge before turning it off: %q", out)
+	}
+	writeFile(t, filepath.Join(e.repo, ".agent-ledger.json"), `{"nudge_days": 0}`)
+	if out := e.injectRaw("startup", "s3"); strings.Contains(out, "older than") {
+		t.Errorf("nudge_days 0 turns the nudge off: %q", out)
 	}
 }
 
