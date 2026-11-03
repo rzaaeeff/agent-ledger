@@ -243,7 +243,7 @@ func PinsList(pins []located, codex bool) string {
 	var b strings.Builder
 	b.WriteString("Pins (shown to you only; the agent did not see this prompt):")
 	for i, p := range pins {
-		fmt.Fprintf(&b, "\n%d. [%s] %s (%s%s)", i+1, p.ID, p.Text, codexWhere(p.Where, codex), untilUser(p.Pin))
+		fmt.Fprintf(&b, "\n%d. [%s] %s (%s%s%s)", i+1, p.ID, p.Text, codexWhere(p.Where, codex), pinAge(p.Pin), untilUser(p.Pin))
 	}
 	b.WriteString("\nUNPIN: <number, id, words or last> removes one.")
 	return b.String()

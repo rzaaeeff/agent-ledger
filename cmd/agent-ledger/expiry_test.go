@@ -50,7 +50,7 @@ func TestPinExpires(t *testing.T) {
 	if ctx := e.inject("compact", "s1"); !strings.Contains(ctx, "Serhii is off") || !strings.Contains(ctx, "applies until 2026-11-06 00:00 (Fri), then stops") {
 		t.Errorf("injected before expiry: %q", ctx)
 	}
-	if list := blockMsg(t, e.say("PINS?", "s1")); !strings.Contains(list, "(this chat until Fri 6 Nov 00:00)") {
+	if list := blockMsg(t, e.say("PINS?", "s1")); !strings.Contains(list, "(this chat, today, until Fri 6 Nov 00:00)") {
 		t.Errorf("PINS? before expiry: %q", list)
 	}
 
@@ -204,7 +204,15 @@ func TestOldPinNudge(t *testing.T) {
 	blockMsg(t, e.say("PIN@repo: recent pins are not nagged about either", "s1"))
 
 	clock(t, monday)
-	m := startMsg(t, e.injectRaw("startup", "s2"))
+	out := e.injectRaw("startup", "s2")
+	m := startMsg(t, out)
+	if ctx := contextOf(out); strings.Contains(ctx, "no end date") || strings.Contains(ctx, "days ago") {
+		t.Errorf("the agent was told a pin is old: %q", ctx)
+	}
+	if list := blockMsg(t, e.say("PINS?", "s2")); !strings.Contains(list, "schema is frozen (this repo, 20 days)") ||
+		!strings.Contains(list, "recent pins are not nagged about either (this repo, 1 day)") {
+		t.Errorf("PINS? ages = %q", list)
+	}
 	if !strings.Contains(m, "1 pin pinned over 14 days ago with no end date") || !strings.Contains(m, "schema is frozen") ||
 		strings.Contains(m, "dated pins") || strings.Contains(m, "recent pins") || !strings.Contains(m, "PROMOTE: <id>") {
 		t.Errorf("nudge = %q", m)
@@ -217,10 +225,15 @@ func TestOldPinNudge(t *testing.T) {
 	if m := startMsg(t, e.injectRaw("startup", "s4")); !strings.Contains(m, "no end date") {
 		t.Errorf("no nudge the next day: %q", m)
 	}
-	// Not after compaction, and never with stale_days=0.
-	if m := startMsg(t, e.injectRaw("compact", "s4")); strings.Contains(m, "no end date") {
+	// Not after compaction, and old pins still come back word for word.
+	out = e.injectRaw("compact", "s4")
+	if m := startMsg(t, out); strings.Contains(m, "no end date") {
 		t.Errorf("nudged after compaction: %q", m)
 	}
+	if ctx := contextOf(out); !strings.Contains(ctx, "schema is frozen") {
+		t.Errorf("old pin not restored after compaction: %q", ctx)
+	}
+	// Never with stale_days=0.
 	t.Setenv("AGENT_LEDGER_STALE_DAYS", "0")
 	_ = os.Remove(filepath.Join(e.root, "nudged"))
 	if m := startMsg(t, e.injectRaw("startup", "s5")); strings.Contains(m, "no end date") {

@@ -63,7 +63,7 @@ Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 | `PIN@repo:` | every chat in this repo, or in this folder when it is not a repo | kept |
 | `PIN@global:` | every chat, in every repo and every folder | kept |
 | `PIN until <when>:` | as `PIN:`; also `PIN! until`, `PIN@repo until` and so on | stops applying when `<when>` begins (see [End dates](#end-dates)) |
-| `PINS?` | lists your pins with numbers; only you see it, the agent gets nothing | |
+| `PINS?` | lists your pins with numbers, how old each is, and any end date; only you see it, the agent gets nothing | |
 | `LEDGER?` | the cheat sheet and what's stored; only you see it | |
 | `PIN [ref]: <new text>` | rewords a pin; it keeps its scope and lifetime | |
 | `UNPIN: <ref>` | removes a pin | |
@@ -98,7 +98,7 @@ PIN@global until 12h: SEV-1 ongoing, the reliability MCP may fail, don't investi
 - `PIN [ref] until <when>: <same text>` changes the end date of a pin, and `until never` removes it. Rewording a pin keeps its end date.
 - In Claude Code, `/pin until fri <text>` (also `/pin @repo until 3d <text>`). A pin that merely starts with the word "until" ("until the migration lands, ...") is pinned as text.
 
-Pins with no end date are not left to go stale silently: when you start a chat, pins older than 14 days with no end date are named, at most once a day per repo, so you can `UNPIN` them, `PROMOTE` them, or give them an end date. `stale_days` changes the 14; `0` turns it off.
+Pins with no end date are not left to go stale silently: when you start a chat, pins older than 14 days with no end date are named, at most once a day per repo, so you can `UNPIN` them, `PROMOTE` them, or give them an end date. `stale_days` changes the 14; `0` turns it off. Only you see this line, not the agent, and an old pin is never removed or hidden because of its age.
 
 You don't have to remember a pin's exact wording:
 

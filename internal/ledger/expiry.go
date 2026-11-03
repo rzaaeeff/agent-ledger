@@ -151,9 +151,26 @@ func whenAgent(t time.Time) string { return t.In(Now().Location()).Format("2006-
 // untilUser is " until Mon 10 Nov 00:00", or "" for a pin with no end date.
 func untilUser(p Pin) string {
 	if t, ok := p.until(); ok {
-		return " until " + whenUser(t)
+		return ", until " + whenUser(t)
 	}
 	return ""
+}
+
+// pinAge is ", N days" for PINS?: how long ago a pin was made; "" for pins from
+// before timestamps were kept.
+func pinAge(p Pin) string {
+	ts, err := time.Parse(time.RFC3339Nano, p.TS)
+	if err != nil {
+		return ""
+	}
+	switch d := int(Now().Sub(ts).Hours() / 24); {
+	case d < 1:
+		return ", today"
+	case d == 1:
+		return ", 1 day"
+	default:
+		return fmt.Sprintf(", %d days", d)
+	}
 }
 
 // listAllPins is listPins including expired pins.
