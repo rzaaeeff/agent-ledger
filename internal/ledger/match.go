@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -123,22 +122,11 @@ type located struct {
 // the current ledger, then the branch, repo and global stores. here names the
 // current ledger ("this chat" for key=session).
 func listPins(cwd, dir, here string) []located {
+	now := Now()
 	var out []located
-	f := filepath.Join(dir, PinnedFile)
-	for _, p := range ReadJSONL[Pin](f) {
-		w := here
-		switch p.Life {
-		case LifeKeep:
-			w += ", kept across /clear"
-		case LifeCarry:
-			w = "CARRY, for the chat after /clear"
-		}
-		out = append(out, located{p, f, w, ""})
-	}
-	for _, s := range PinScopes(cwd, dir) {
-		f := filepath.Join(s.Dir, PinnedFile)
-		for _, p := range ReadJSONL[Pin](f) {
-			out = append(out, located{p, f, s.Short, s.Name})
+	for _, p := range listAllPins(cwd, dir, here) {
+		if !p.expired(now) {
+			out = append(out, p)
 		}
 	}
 	return out
@@ -255,9 +243,24 @@ func PinsList(pins []located, codex bool) string {
 	var b strings.Builder
 	b.WriteString("Pins (shown to you only; the agent did not see this prompt):")
 	for i, p := range pins {
-		fmt.Fprintf(&b, "\n%d. [%s] %s (%s)", i+1, p.ID, p.Text, codexWhere(p.Where, codex))
+		fmt.Fprintf(&b, "\n%d. [%s] %s (%s%s)", i+1, p.ID, p.Text, codexWhere(p.Where, codex), untilUser(p.Pin))
 	}
 	b.WriteString("\nUNPIN: <number, id, words or last> removes one.")
+	return b.String()
+}
+
+// ExpiredList is the PINS? section for pins past their end date, still kept for
+// a few days so they can be brought back; "" when there are none.
+func ExpiredList(exp []located) string {
+	if len(exp) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nExpired (no longer apply; deleted %d days after their end date; pin the same text again to bring one back):", ExpiredGraceDays)
+	for _, p := range exp {
+		t, _ := p.until()
+		fmt.Fprintf(&b, "\n- [%s] %s (%s, ended %s)", p.ID, p.Text, p.Where, whenUser(t))
+	}
 	return b.String()
 }
 
@@ -358,7 +361,10 @@ func HelpText(status string, folder, codex bool) string {
 	}
 	return `agent-ledger keeps the lines you mark and puts them back after compaction.
 Start a prompt with (any case; only at the start):
-` + keep + scopes + `  PIN [ref]: <new text>   reword a pin
+` + keep + scopes + `  PIN until <when>: <text>
+                          stops applying when <when> begins: mon, tomorrow,
+                          2026-11-10, 12h, 3d, 2w (also PIN! / PIN@scope)
+  PIN [ref]: <new text>   reword a pin (PIN [ref] until <when>: changes its end)
   UNPIN: <ref>            remove a pin
 ` + promote + `  PINS?                   list pins          LEDGER?   this help
 <ref> is a number from PINS?, an id, "last", or words from the pin.

@@ -121,11 +121,12 @@ type pinCmd struct {
 	scope string // "" (session) | branch | repo | global, or an unknown word
 	ref   string // PIN [ref]: rewords the pin ref selects
 	text  string
+	until string // PIN until <when>: the <when> as typed
 	typed string // the verb as typed, e.g. "pin" (the scope may be lower case anyway)
 }
 
 // The ! may come before or after the scope, and a full-width colon counts too.
-var pinRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:[ \t]*@([a-z]+))?(!)?(?:[ \t]*\[([^\]\n]*)\])?[ \t]*[:：]`)
+var pinRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:[ \t]*@([a-z]+))?(!)?(?:[ \t]*\[([^\]\n]*)\])?(?:[ \t]+until[ \t]+([^\s:：]+))?[ \t]*[:：]`)
 
 // Look-alikes of a command that are not one: a wrong separator ("PIN; x",
 // "pin = x"), or the keyword in capitals without the colon ("PIN x").
@@ -182,7 +183,7 @@ func parsePin(prompt string) (pinCmd, bool) {
 		text = text[:i]
 	}
 	return pinCmd{verb: strings.ToUpper(m[1]), keep: m[2] != "" || m[4] != "", scope: strings.ToLower(m[3]), ref: strings.TrimSpace(m[5]),
-		text: strings.TrimSpace(text), typed: m[1]}, true
+		text: strings.TrimSpace(text), until: m[6], typed: m[1]}, true
 }
 
 // pinID is sha1(text)[:6] for session pins (as before scopes existed) and
@@ -217,6 +218,9 @@ func pinLines(pins []Pin, tag bool) []string {
 		if tag && p.Life == LifeKeep {
 			line += " (kept across /clear)"
 		}
+		if t, ok := p.until(); ok {
+			line += " (applies until " + whenAgent(t) + ", then stops)"
+		}
 		out = append(out, line)
 	}
 	return out
@@ -226,7 +230,7 @@ func pinLines(pins []Pin, tag bool) []string {
 // wait for the next /clear.
 func sessionPins(dir string) []Pin {
 	var out []Pin
-	for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
+	for _, p := range readPins(filepath.Join(dir, PinnedFile)) {
 		if p.Life != LifeCarry {
 			out = append(out, p)
 		}
@@ -238,7 +242,7 @@ func sessionPins(dir string) []Pin {
 func scopedSections(cwd, dir string) string {
 	var b strings.Builder
 	for _, s := range PinScopes(cwd, dir) {
-		if ls := pinLines(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)), false); len(ls) > 0 {
+		if ls := pinLines(readPins(filepath.Join(s.Dir, PinnedFile)), false); len(ls) > 0 {
 			fmt.Fprintf(&b, "\n### %s\n%s", s.Label, strings.Join(ls, "\n"))
 		}
 	}
@@ -259,7 +263,7 @@ func ScopeStatus(cwd, dir string) string {
 		case s.Name == ScopeRepo && IsFolder(filepath.Dir(dir)):
 			name = "folder"
 		}
-		n := len(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)))
+		n := len(readPins(filepath.Join(s.Dir, PinnedFile)))
 		total += n
 		parts = append(parts, fmt.Sprintf("%s %d", name, n))
 	}

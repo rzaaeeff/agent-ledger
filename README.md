@@ -2,27 +2,30 @@
 
 [![Release](https://img.shields.io/github/v/release/rzaaeeff/agent-ledger)](https://github.com/rzaaeeff/agent-ledger/releases/latest) [![CI](https://img.shields.io/github/actions/workflow/status/rzaaeeff/agent-ledger/on-merge.yml?branch=master&label=CI)](https://github.com/rzaaeeff/agent-ledger/actions/workflows/on-merge.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-When Claude Code compacts a conversation, your earlier instructions survive only as well as the model-written summary keeps them. In a short session that is often word for word. Over a long one, a rule can come back reworded or not at all ([#94564](https://github.com/anthropics/claude-code/issues/94564), [#104779](https://github.com/anthropics/claude-code/issues/104779)).
+Temporary rules for your coding agent: one line to add, scoped to a chat, a branch, a repo or everywhere, and gone when they stop being true.
 
-agent-ledger keeps the lines you mark with `PIN:` outside the conversation and puts them back after every compaction, byte for byte, whatever the summary did. It is a small local hook for Claude Code and Codex: no model calls, no server, no database.
+"CI is down until tomorrow, don't debug it." "No migrations on this branch." "Serhii is off until Monday." Rules like these don't belong in `CLAUDE.md`, and typed into the chat they don't last: when Claude Code compacts a conversation, your earlier instructions survive only as well as the model-written summary keeps them. Over a long session, a rule can come back reworded or not at all ([#94564](https://github.com/anthropics/claude-code/issues/94564), [#104779](https://github.com/anthropics/claude-code/issues/104779)).
+
+agent-ledger keeps the lines you mark with `PIN:` outside the conversation and puts them back after every compaction, byte for byte, whatever the summary did. Give a pin an end date and it stops applying then, and the agent is told. It is a small local hook for Claude Code and Codex: no model calls, no server, no database.
 
 ![Typing a PIN: line, running /compact, and the agent quoting the pin back word for word](docs/demo.gif)
 
 ```
-PIN: don't touch the migrations, the schema is frozen until Friday
+PIN until fri: don't touch the migrations, the schema is frozen
 ```
 
-After `/compact`, the agent sees that pin again, word for word, and you get a one-line note saying what was restored.
+After `/compact`, the agent sees that pin again, word for word, and you get a one-line note saying what was restored. When Friday begins, the pin stops applying and the open chat is told so.
 
 **Status: v0.3, early.** CI runs the tests on Linux, macOS and Windows, and exercises the Windows launcher end to end on `windows-latest`. The agent integration was exercised live on Claude Code 2.1.314 (macOS, Linux, WSL and Windows with Git Bash) and Codex 0.146 (macOS), 0.164 and 0.166 (Linux), 0.166 and the desktop app's 0.163 (Windows). That is a handful of people's runs, not wide use: please report what breaks.
 
 ## Is it for you?
 
-Use it if your sessions are long enough to compact and you keep repeating the same instructions after they do.
+Use it if you give your agent short-lived rules (an outage, a freeze, a teammate away, a half-done refactor) and keep repeating them after compaction, or forget to take them out of a file afterwards.
 
 Skip it if:
 
 - The rule should hold forever. Put it in `AGENTS.md` or `CLAUDE.md`; the agent already rereads those. (`PROMOTE:` moves a pin there when it turns out to be permanent.)
+- You run one chat per checkout and are happy to edit `CLAUDE.local.md` and clean it up yourself. That file also survives compaction; see [Why not `CLAUDE.md`, `CLAUDE.local.md`, or a five-line hook?](#why-not-claudemd-claudelocalmd-or-a-five-line-hook)
 - You want searchable memory across projects or automatic notes. This only keeps what you mark, plus recent prompts.
 
 What it does not do: make the model obey. It keeps your text in the context; whether the agent follows it is still up to the model.
@@ -59,6 +62,7 @@ Start a prompt with one of these. Forgot them? Send `LEDGER?` for a cheat sheet.
 | `PIN@branch:` | every chat on this branch (refused on `main`, `master`, the default branch, a detached HEAD, and outside a repo) | kept |
 | `PIN@repo:` | every chat in this repo, or in this folder when it is not a repo | kept |
 | `PIN@global:` | every chat, in every repo and every folder | kept |
+| `PIN until <when>:` | as `PIN:`; also `PIN! until`, `PIN@repo until` and so on | stops applying when `<when>` begins (see [End dates](#end-dates)) |
 | `PINS?` | lists your pins with numbers; only you see it, the agent gets nothing | |
 | `LEDGER?` | the cheat sheet and what's stored; only you see it | |
 | `PIN [ref]: <new text>` | rewords a pin; it keeps its scope and lifetime | |
@@ -76,6 +80,25 @@ In Claude Code each one is also a slash command: `/pin <text>`, `/pin ! <text>`,
 A `<ref>` is a number from `PINS?`, a pin's id, `last`, or words from the pin. Prefixes work in any case (`pin:` = `PIN:`) but only at the start of the prompt; "pin:" in the middle of a sentence is ignored. A command is the first line only: the rest of the prompt goes to the agent as usual. A long or pasted command works too: Claude Code wraps a paste (and anything typed fast enough to look like one) in a `<pasted_content>` block, and a block that is nothing but a command is unwrapped before it is read. A command inside a paste that has your own words around it is left alone, so pasted text cannot pin itself. Near misses like `PIN; x` or `PIN x` save nothing and tell you so (the prompt still goes to the agent). A lower-case `pin:` saves and offers `UNPIN: last` in case you didn't mean it.
 
 Claude Code prefixes every reply to a command with `UserPromptSubmit operation blocked by hook:`, or `UserPromptExpansion operation blocked by hook:` for a slash command; Codex says `Blocked by hook`. Those labels are the agent's and the plugin cannot change them. They mean the command was handled locally and never reached the model. The text after it (`pinned [a1b2]. (2 pins apply here)`) is the reply. Nothing was rejected.
+
+### End dates
+
+Most temporary rules have a day they stop being true. Say so and the pin ends by itself:
+
+```
+PIN until mon: Serhii is off, stop suggesting I ask him
+PIN@repo until tomorrow: GitHub Actions is down, gate changes on the local test suite
+PIN@global until 12h: SEV-1 ongoing, the reliability MCP may fail, don't investigate it
+```
+
+- `<when>` is a weekday (`mon`, `friday`: the next one, never today), `tomorrow`, a date (`2026-11-10`), or a length (`12h`, `3d`, `2w`). A day means the start of that day, in local time: `until mon` stops applying when Monday begins. Anything else is refused and nothing is saved.
+- The reply names the exact moment (`pinned [a1b2c3] for this repo until Tue 3 Nov 00:00`), so a misread date shows up straight away. The agent sees the end date next to the pin too.
+- When it passes, the pin is no longer put back after compaction or listed as applying, and a chat that was open while it applied is told once, you with a one-line note and the agent with context saying it no longer applies. A chat started later is not told about a pin it never had.
+- An expired pin stays in its file for 3 days and `PINS?` lists it under "Expired". Pin the same text again to bring it back. After that it is deleted.
+- `PIN [ref] until <when>: <same text>` changes the end date of a pin, and `until never` removes it. Rewording a pin keeps its end date.
+- In Claude Code, `/pin until fri <text>` (also `/pin @repo until 3d <text>`). A pin that merely starts with the word "until" ("until the migration lands, ...") is pinned as text.
+
+Pins with no end date are not left to go stale silently: when you start a chat, pins older than 14 days with no end date are named, at most once a day per repo, so you can `UNPIN` them, `PROMOTE` them, or give them an end date. `stale_days` changes the 14; `0` turns it off.
 
 You don't have to remember a pin's exact wording:
 
@@ -96,9 +119,17 @@ agent-ledger preview          # or: preview clear
 
 Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): Claude Code puts plugin `bin/` folders on its shell's PATH, and from a normal terminal there is no session id, so you'd see the branch ledger (outside a repo, the one shared by the folder), not your chat's. In Codex, call the plugin's `bin/agent-ledger` by full path. Both find the binary under `CLAUDE_CONFIG_DIR` or `CODEX_HOME` if you set them.
 
-## Why not `CLAUDE.md`, or a five-line hook?
+## Why not `CLAUDE.md`, `CLAUDE.local.md`, or a five-line hook?
 
-**`CLAUDE.md` / `AGENTS.md`** are the right place for rules that hold forever, and the agent already rereads them after compaction. They are the wrong place for "until Friday", "on this branch only" or "for this chat only": you have to open a file, edit it, and remember to take it out again, and in a shared repo your teammates get your temporary rule too. Pins are one line, scoped, and removable with `UNPIN: friday`. When a pin turns out to be permanent, `PROMOTE:` moves it into that file for you.
+**`CLAUDE.md` / `AGENTS.md`** are the right place for rules that hold forever, and the agent already rereads them after compaction. They are the wrong place for "until Friday", "on this branch only" or "for this chat only": you have to open a file, edit it, and remember to take it out again, and in a shared repo your teammates get your temporary rule too. When a pin turns out to be permanent, `PROMOTE:` moves it into that file for you.
+
+**`CLAUDE.local.md`** (and `~/.claude/CLAUDE.md`) fix the teammates part: they are yours only, and they also survive compaction. If you work one chat per checkout and clean up after yourself, they are enough. What they don't do:
+
+- **End.** A line in a file stays until you delete it. A month later the agent is still not debugging CI because of an outage that is long over. A pin with an end date stops by itself, and an old pin without one gets named at startup.
+- **Stay in one chat.** `CLAUDE.local.md` belongs to the folder, so every chat in that checkout reads it, including the one you opened to fix the very thing another chat was told to leave alone. A `PIN:` applies to the chat you typed it in.
+- **Follow a branch.** The file stays when you switch branches. `PIN@branch:` applies on that branch only, and goes when the branch is deleted.
+- **Cost one line.** A pin is typed where you already are, and removed by its words (`UNPIN: serhii`), without opening a file.
+- **Work in Codex.** Codex has no `CLAUDE.local.md`; pins work in both.
 
 **A five-line `SessionStart` hook** that cats a file into the context does most of the restore, and the Claude Code docs show one. What the five lines don't give you: scopes (chat, branch, repo, global) and a `/clear` lifetime for each, removing a pin by words rather than exact text, a handover into the next chat, a size budget that fits under the 10k hook limit so the restore isn't truncated, secret masking before anything is written, idle ledgers pruned after 30 days, most of the same behaviour in Codex (not the `/clear` handover, which Codex gives no hook for), and commands that cost no model turn. If you only need the restore, write the five lines.
 
@@ -108,7 +139,7 @@ Run these from the agent's shell (e.g. `!agent-ledger status` in Claude Code): C
 
 - By default only the ledger command itself is logged, not your other prompts: when a command has more lines under it, those lines go to the agent and are not kept. `"logging": "all"` also logs every prompt, and then your last 5 come back after compaction.
 - Before anything is stored, common secrets are masked: API keys, GitHub/Slack/AWS tokens, private keys, JWTs, Stripe keys, Slack webhook URLs, URL passwords, and `password=`-style values (also names like `db_password`, quoted or not). This is pattern matching. It will miss some secrets, and it can mask harmless text that looks like one.
-- Files stay on your machine, under `~/.local/state/agent-ledger/` (`%LOCALAPPDATA%\agent-ledger` on Windows; a config file goes in `~/.config/agent-ledger/config.json`, or `%APPDATA%\agent-ledger\config.json`). On Linux and macOS they are made readable by you only, and an existing folder another tool created is tightened on use. On Windows they inherit the permissions of the folder above, which on some setups grants read access to other local accounts. The tool itself makes no network calls apart from downloading its own binary and checksum file from the GitHub release (retried until it succeeds); what it re-injects goes to your model provider like the rest of the chat. When a session starts, ledgers in that repo untouched for 30 days are deleted, including their `PIN!:` pins. `PIN@branch:` pins go once the branch is deleted and idle. Repo and global pins are kept until you `UNPIN` them.
+- Files stay on your machine, under `~/.local/state/agent-ledger/` (`%LOCALAPPDATA%\agent-ledger` on Windows; a config file goes in `~/.config/agent-ledger/config.json`, or `%APPDATA%\agent-ledger\config.json`). On Linux and macOS they are made readable by you only, and an existing folder another tool created is tightened on use. On Windows they inherit the permissions of the folder above, which on some setups grants read access to other local accounts. The tool itself makes no network calls apart from downloading its own binary and checksum file from the GitHub release (retried until it succeeds); what it re-injects goes to your model provider like the rest of the chat. When a session starts, ledgers in that repo untouched for 30 days are deleted, including their `PIN!:` pins. `PIN@branch:` pins go once the branch is deleted and idle. Repo and global pins are kept until you `UNPIN` them or their end date passes; an expired pin is deleted 3 days after its end date.
 - A repo's `.agent-ledger.json` can only make `logging`, `redact`, `key` and `prune_days` stricter than your own settings, and its `promote_to` may only be `AGENTS.md` or `CLAUDE.md`. Anything else is ignored; the session-start note says so and `agent-ledger config` says why.
 - What comes back after compaction is framed for the agent as your notes: pins are your words; recent prompts are quoted context, not new instructions. That lowers the risk of old text being read as a fresh order; it does not remove it.
 
@@ -156,6 +187,7 @@ Optional. Put it in `~/.config/agent-ledger/config.json` (yours) or `.agent-ledg
 | `prune_days` | days of no activity before a ledger is deleted; `0` = never | `30` |
 | `recent_prompts` | how many come back after compaction (with `logging: all`) | `5` |
 | `budget_bytes` | size limit of what is re-injected, in bytes, at most 9500 (Claude Code keeps 10,000 characters of hook output, Codex about 10,000 bytes). Older prompts are dropped to fit; pins that still don't fit are left out, and the agent is told so at the top | `9000` |
+| `stale_days` | age in days of a pin with no end date that is named at startup (once a day); `0` = never | `14` |
 | `promote_to` | file name `PROMOTE:` writes to | the one of `CLAUDE.md`/`AGENTS.md` that exists; with both, `CLAUDE.md` (what Claude Code reads) unless it imports `@AGENTS.md` or you run Codex; with neither, `AGENTS.md` |
 
 Invalid values are ignored and listed by `agent-ledger config`.

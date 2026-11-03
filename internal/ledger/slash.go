@@ -3,6 +3,7 @@ package ledger
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -46,8 +47,29 @@ func slashPrompt(verb, args string) (string, bool) {
 				args = strings.TrimSpace(rest)
 			}
 		}
+		if when, rest, ok := slashUntil(args); ok {
+			p += " until " + when
+			args = rest
+		}
 	}
 	return p + ": " + args, true
+}
+
+// slashUntil takes "until <when> <text>" off the front of /pin's arguments. A
+// pin that merely starts with "until" ("until the migration lands, ...") is left
+// alone: only a word that reads as an end date, or has a digit in it (a mistyped
+// date, which is then refused), counts.
+func slashUntil(args string) (when, rest string, ok bool) {
+	f := strings.Fields(args)
+	if len(f) < 2 || !strings.EqualFold(f[0], "until") {
+		return "", args, false
+	}
+	_, err := ParseUntil(f[1], Now())
+	if err != nil && !errors.Is(err, errNever) && !strings.ContainsAny(f[1], "0123456789") {
+		return "", args, false
+	}
+	rest = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(args), f[0])), f[1]))
+	return f[1], rest, true
 }
 
 func slashMultiLine(name string) string {

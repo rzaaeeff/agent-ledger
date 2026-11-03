@@ -273,7 +273,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 	switch q := strings.TrimSpace(h.Prompt); {
 	case strings.EqualFold(q, "PINS?"):
 		pins := listPins(h.Cwd, dir, here)
-		msg := PinsList(pins, codex)
+		msg := PinsList(pins, codex) + ExpiredList(expiredPins(h.Cwd, dir, here))
 		if codex {
 			msg += CodexClearNote(pins)
 		}
@@ -327,11 +327,15 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 			msg = "ledger:" + note
 		}
 		v := map[string]any{}
+		// UNPIN/PROMOTE/reword blocked their prompt, so the model learns of them now.
+		ctx := takeNotices(dir)
+		if user, agent := takeExpired(h.Cwd, dir, here); user != "" {
+			msg = strings.TrimSpace(user + " " + msg)
+			ctx = strings.TrimSpace(ctx + "\n" + agent)
+		}
 		if msg != "" {
 			v["systemMessage"] = msg
 		}
-		// UNPIN/PROMOTE/reword blocked their prompt, so the model learns of them now.
-		ctx := takeNotices(dir)
 		if hint := nearMiss(prompt); hint != "" {
 			// The near miss is shown to the user only. Say so, or the model reads the
 			// prompt as a command and confirms a pin that was never stored.
@@ -358,6 +362,19 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		emit(out, "ledger: nothing saved: "+cmd.verb+": needs text after the colon.")
 		return
 	}
+	var until time.Time
+	if cmd.until != "" {
+		if cmd.verb != "PIN" {
+			emit(out, "ledger: nothing saved: only PIN takes an end date (PIN until <when>: <text>).")
+			return
+		}
+		t, err := ParseUntil(cmd.until, Now())
+		if err != nil && !errors.Is(err, errNever) {
+			emit(out, "ledger: nothing saved: "+err.Error()+".")
+			return
+		}
+		until = t
+	}
 	if MkdirPrivate(dir) != nil {
 		emit(out, notSaved(cmd.verb)+": could not create "+dir+" (check permissions and disk space).")
 		return
@@ -378,7 +395,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		out = blockWriter{out}
 	}
 	if cmd.ref != "" {
-		rewordPin(h, dir, here, cmd, codex, out)
+		rewordPin(h, dir, here, cmd, until, codex, out)
 		return
 	}
 	switch cmd.verb {
@@ -454,21 +471,50 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 						emit(out, fmt.Sprintf("already pinned [%s]; could NOT make it survive /clear (see %s).", p.ID, filepath.Join(dir, ErrorsFile)))
 						return
 					}
+					p.Life = LifeKeep
 					msg += "; it now survives /clear"
 				}
-				pinned(out, dir, msg+". "+pinsHere(), cmd.verb, pass, "")
+				news := ""
+				if cmd.until != "" && p.Until != untilStamp(until) {
+					q := p.Pin
+					q.Until = untilStamp(until)
+					if ok, err := replacePin(file, p.Pin, q); err != nil || !ok {
+						LogError(dir, "pin end date change failed")
+						emit(out, fmt.Sprintf("already pinned [%s]; could NOT change its end date (see %s).", p.ID, filepath.Join(dir, ErrorsFile)))
+						return
+					}
+					if until.IsZero() {
+						msg += "; it no longer has an end date"
+						news = fmt.Sprintf("The user removed the end date of pin [%s] %q; it applies until unpinned.", p.ID, p.Text)
+					} else {
+						msg += "; it now applies until " + whenUser(until)
+						news = fmt.Sprintf("The user changed pin [%s] %q to apply until %s.", p.ID, p.Text, whenAgent(until))
+					}
+				} else if t, ok := p.until(); ok {
+					msg += ", until " + whenUser(t)
+				}
+				pinned(out, dir, msg+". "+pinsHere(), cmd.verb, pass, news)
 				return
 			case p.ID != id && looksSimilar(p.Text, cmd.text):
 				similar = append(similar, p)
 			}
 		}
-		if MkdirPrivate(target) != nil || Append(file, Marshal(Pin{id, Now().Format(time.RFC3339Nano), cmd.text, life})) != nil {
+		// An expired copy of this text would show twice in PINS?; pinning it again replaces it.
+		_ = dropExpired(file, func(p Pin) bool {
+			return normText(p.Text) == normText(cmd.text) && (p.Life == LifeCarry) == (life == LifeCarry)
+		})
+		if MkdirPrivate(target) != nil || Append(file, Marshal(Pin{ID: id, TS: Now().Format(time.RFC3339Nano), Text: cmd.text, Life: life, Until: untilStamp(until)})) != nil {
 			LogError(dir, "pinned append failed")
 			tellAgent(out, notSaved(cmd.verb)+": could not write "+file+" (check permissions and disk space).",
 				"agent-ledger: the "+cmd.verb+" line in this prompt was NOT stored (the ledger could not be written). Do not tell the user it was saved.")
 			return
 		}
 		msg := fmt.Sprintf("pinned [%s]%s.", id, where)
+		agentUntil := ""
+		if !until.IsZero() {
+			msg = fmt.Sprintf("pinned [%s]%s until %s; then it stops applying and you are told.", id, where, whenUser(until))
+			agentUntil = " until " + whenAgent(until) + ", then it stops"
+		}
 		if len(similar) > 0 {
 			if len(similar) > 2 {
 				similar = similar[:2]
@@ -486,7 +532,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 				msg += fmt.Sprintf(" Warning: pins here now take %d of the %d bytes that come back after compaction; UNPIN the ones that no longer apply.", n, budget)
 			}
 		}
-		pinned(out, dir, msg+" "+pinsHere(), cmd.verb, pass, fmt.Sprintf("The user pinned [%s]%s: %q. It applies from now on.", id, where, cmd.text))
+		pinned(out, dir, msg+" "+pinsHere(), cmd.verb, pass, fmt.Sprintf("The user pinned [%s]%s: %q. It applies from now on%s.", id, where, cmd.text, agentUntil))
 	case "UNPIN", "PROMOTE":
 		if cmd.verb == "PROMOTE" && (cmd.scope != "" || cmd.keep) {
 			block(out, "PROMOTE takes no scope or '!': PROMOTE: <id or text>.")
@@ -578,7 +624,7 @@ func pickPin(verb, ref string, all []located) (located, string) {
 
 // rewordPin handles PIN [ref]: <text>: the pin keeps its store and lifetime and
 // gets the id of its new text.
-func rewordPin(h HookInput, dir, here string, cmd pinCmd, codex bool, out io.Writer) {
+func rewordPin(h HookInput, dir, here string, cmd pinCmd, until time.Time, codex bool, out io.Writer) {
 	if cmd.verb != "PIN" || cmd.keep || cmd.scope != "" {
 		block(out, "ledger: nothing saved. To reword a pin: PIN [id]: new text (it keeps its scope and lifetime).")
 		return
@@ -595,7 +641,11 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, codex bool, out io.Wri
 		block(out, strings.Replace(miss, "Send PIN [ref]: <id>", "Send PIN [<id>]: <new text>", 1))
 		return
 	}
-	if hit.Text == cmd.text {
+	newUntil := hit.Until
+	if cmd.until != "" {
+		newUntil = untilStamp(until)
+	}
+	if hit.Text == cmd.text && newUntil == hit.Until {
 		block(out, fmt.Sprintf("[%s] already says that.", hit.ID))
 		return
 	}
@@ -609,7 +659,10 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, codex bool, out io.Wri
 	if hit.Life == LifeCarry {
 		scope = LifeCarry
 	}
-	p := Pin{uniqueID(hit.File, pinID(scope, cmd.text), cmd.text), Now().Format(time.RFC3339Nano), cmd.text, hit.Life}
+	p := Pin{ID: hit.ID, TS: hit.TS, Text: cmd.text, Life: hit.Life, Until: newUntil}
+	if hit.Text != cmd.text {
+		p.ID, p.TS = uniqueID(hit.File, pinID(scope, cmd.text), cmd.text), Now().Format(time.RFC3339Nano)
+	}
 	switch ok, err := replacePin(hit.File, hit.Pin, p); {
 	case err != nil:
 		LogError(dir, "reword failed")
@@ -617,8 +670,19 @@ func rewordPin(h HookInput, dir, here string, cmd pinCmd, codex bool, out io.Wri
 	case !ok:
 		block(out, fmt.Sprintf("PIN NOT SAVED: [%s] was removed meanwhile.", hit.ID))
 	default:
-		notice(dir, fmt.Sprintf("The user reworded pin [%s] %q; it is now [%s] %q.", hit.ID, hit.Text, p.ID, p.Text))
-		block(out, fmt.Sprintf("reworded [%s] -> [%s] (%s). %s", hit.ID, p.ID, hit.Where, brief(listPins(h.Cwd, dir, here), codex)))
+		ends, endsAgent := "", ""
+		if t, ok := p.until(); ok {
+			ends, endsAgent = ", until "+whenUser(t), ", applying until "+whenAgent(t)
+		} else if hit.Until != "" {
+			ends, endsAgent = ", no end date", ", with no end date"
+		}
+		if hit.Text == cmd.text {
+			notice(dir, fmt.Sprintf("The user changed the end date of pin [%s] %q%s.", p.ID, p.Text, endsAgent))
+			block(out, fmt.Sprintf("[%s] now applies%s (%s). %s", p.ID, strings.TrimPrefix(ends, ","), hit.Where, brief(listPins(h.Cwd, dir, here), codex)))
+			return
+		}
+		notice(dir, fmt.Sprintf("The user reworded pin [%s] %q; it is now [%s] %q%s.", hit.ID, hit.Text, p.ID, p.Text, endsAgent))
+		block(out, fmt.Sprintf("reworded [%s] -> [%s] (%s%s). %s", hit.ID, p.ID, hit.Where, ends, brief(listPins(h.Cwd, dir, here), codex)))
 	}
 }
 
@@ -728,6 +792,13 @@ func HookSessionStart(h HookInput, out io.Writer) {
 	if err != nil {
 		return
 	}
+	if h.Source != "resume" && h.Source != "compact" {
+		// A new or cleared chat never had the pins that expired before it began.
+		// After compaction the summary may still carry one, so the next prompt says it ended.
+		// Deferred: this can create the chat's folder, and /clear reads a missing
+		// folder as the sign of a new session id, so it must look first.
+		defer markExpiredSeen(h.Cwd, dir)
+	}
 	switch h.Source {
 	case "resume":
 		return
@@ -750,6 +821,11 @@ func HookSessionStart(h HookInput, out io.Writer) {
 		msg = "ledger: restored " + n.String() + " after compaction."
 	} else if n.pins > 0 {
 		msg = "ledger: " + pinsApply(n.pins) + " (PINS? lists them)."
+	}
+	if h.Source == "startup" {
+		if nudge := staleNudge(h.Cwd, root, dir, cfg.StaleDays); nudge != "" {
+			msg = strings.TrimSpace(msg + " " + nudge)
+		}
 	}
 	if h.Source == "startup" && len(cfg.Problems) > 0 {
 		msg = strings.TrimSpace(msg + fmt.Sprintf(" agent-ledger ignored %s; `agent-ledger config` says why.", ignoredList(cfg.Problems)))
@@ -908,7 +984,7 @@ func fitPins(cwd, dir string, budget int) (text string, kept, dropped int) {
 	}
 	secs := []section{{title: "Pinned by the user in this chat (standing rules and concerns, verbatim)", lines: pinLines(sessionPins(dir), true)}}
 	for _, s := range PinScopes(cwd, dir) {
-		secs = append(secs, section{title: s.Label, lines: pinLines(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)), false)})
+		secs = append(secs, section{title: s.Label, lines: pinLines(readPins(filepath.Join(s.Dir, PinnedFile)), false)})
 	}
 	live := 0
 	for i := range secs {
@@ -1049,7 +1125,7 @@ func cleared(cfg Config, root, dir string, h HookInput, out io.Writer) {
 				have[p.ID] = true
 			}
 			for _, p := range note.Kept {
-				if !have[p.ID] {
+				if !have[p.ID] && !p.expired(Now()) {
 					_ = Append(filepath.Join(dir, PinnedFile), Marshal(p))
 				}
 			}

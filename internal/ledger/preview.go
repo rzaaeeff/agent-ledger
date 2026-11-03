@@ -23,7 +23,7 @@ func Preview(cfg Config, cwd, sid, source string) (string, error) {
 	case "clear":
 		if cfg.Clear == "drop" {
 			var drop, kept, carry []Pin
-			for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
+			for _, p := range readPins(filepath.Join(dir, PinnedFile)) {
 				switch p.Life {
 				case LifeKeep:
 					kept = append(kept, p)
