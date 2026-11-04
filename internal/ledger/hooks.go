@@ -329,7 +329,7 @@ func HookUserPromptSubmit(h HookInput, out io.Writer) {
 		v := map[string]any{}
 		// UNPIN/PROMOTE/reword blocked their prompt, so the model learns of them now.
 		ctx := takeNotices(dir)
-		if user, agent := takeExpired(h.Cwd, dir, here); user != "" {
+		if user, agent := takeExpired(h.Cwd, dir, here, chatID(h.SessionID)); user != "" {
 			msg = strings.TrimSpace(user + " " + msg)
 			ctx = strings.TrimSpace(ctx + "\n" + agent)
 		}
@@ -797,7 +797,7 @@ func HookSessionStart(h HookInput, out io.Writer) {
 		// After compaction the summary may still carry one, so the next prompt says it ended.
 		// Deferred: this can create the chat's folder, and /clear reads a missing
 		// folder as the sign of a new session id, so it must look first.
-		defer markExpiredSeen(h.Cwd, dir)
+		defer markExpiredSeen(h.Cwd, dir, chatID(h.SessionID))
 	}
 	switch h.Source {
 	case "resume":

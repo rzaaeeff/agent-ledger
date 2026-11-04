@@ -126,7 +126,7 @@ type pinCmd struct {
 }
 
 // The ! may come before or after the scope, and a full-width colon counts too.
-var pinRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:[ \t]*@([a-z]+))?(!)?(?:[ \t]*\[([^\]\n]*)\])?(?:[ \t]+until[ \t]+([^\s:：]+))?[ \t]*[:：]`)
+var pinRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:[ \t]*@([a-z]+))?(!)?(?:[ \t]*\[([^\]\n]*)\])?(?:[ \t]+until[ \t]+([^\s:：,?!]+(?:[ \t]+[^\s:：,?!]+){0,2}))?[ \t]*[:：]`)
 
 // Look-alikes of a command that are not one: a wrong separator ("PIN; x",
 // "pin = x"), or the keyword in capitals without the colon ("PIN x").
@@ -178,12 +178,34 @@ func parsePin(prompt string) (pinCmd, bool) {
 	if m == nil {
 		return pinCmd{}, false
 	}
+	if !meantAsEndDate(m[1], m[6]) {
+		return pinCmd{}, false
+	}
 	text := prompt[len(m[0]):]
 	if i := strings.IndexAny(text, "\r\n"); i >= 0 {
 		text = text[:i]
 	}
 	return pinCmd{verb: strings.ToUpper(m[1]), keep: m[2] != "" || m[4] != "", scope: strings.ToLower(m[3]), ref: strings.TrimSpace(m[5]),
 		text: strings.TrimSpace(text), until: m[6], typed: m[1]}, true
+}
+
+// datePhraseRe is a several-word end date as people write one: "10 nov",
+// "nov 10th", "next friday", "this week", "2026-11-10 18" (the ":00" ends the match).
+var datePhraseRe = regexp.MustCompile(`^(?:\d{1,2}(?:st|nd|rd|th)? ` + monthRe + `|` + monthRe + ` \d{1,2}(?:st|nd|rd|th)?|(?:next|this) (?:mon|tue|wed|thu|fri|sat|sun)[a-z]*|(?:next|this) (?:week|month)|\d{4}-\d{1,2}-\d{1,2} \d{1,2}(?:[ap]m)?)$`)
+
+const monthRe = `(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)`
+
+// meantAsEndDate tells a dated pin with a several-word end date ("PIN until next
+// friday:", "pin until 10 Nov:"), which is refused with help, from a sentence
+// that happens to start "pin until ...:" and goes to the agent untouched. One
+// word, or the verb in capitals, is a command as before; in lower case the words
+// must look like a date.
+func meantAsEndDate(typed, until string) bool {
+	f := strings.Fields(strings.ToLower(until))
+	if len(f) < 2 || typed == strings.ToUpper(typed) {
+		return true
+	}
+	return datePhraseRe.MatchString(strings.Join(f, " "))
 }
 
 // pinID is sha1(text)[:6] for session pins (as before scopes existed) and

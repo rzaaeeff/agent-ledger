@@ -138,9 +138,31 @@ func TestEndDateRefusalsAndChanges(t *testing.T) {
 		"PIN until 2020-01-01: x": "already begun",
 		"CARRY until fri: x":      "only PIN takes an end date",
 		"UNPIN until fri: x":      "only PIN takes an end date",
+		// Several words, in any case, are refused too, not passed on as a prompt.
+		"PIN until next friday: x":      "not an end date I can read",
+		"pin until next friday: x":      "not an end date I can read",
+		"PIN@repo until 10 Nov: x":      "not an end date I can read",
+		"PIN until 2026-11-10 18:00: x": "not an end date I can read",
 	} {
 		if m := blockMsg(t, e.say(prompt, "s1")); !strings.Contains(m, "nothing saved") || !strings.Contains(m, want) {
 			t.Errorf("%q -> %q, want %q", prompt, m, want)
+		}
+	}
+	// A sentence that happens to start "pin until" is not a command.
+	for _, prompt := range []string{
+		"pin until we upgrade, numpy 2 breaks with: ImportError foo",
+		"Pin until which version? pip says: conflict",
+		"pin until the lockfile is regenerated: is that safe?",
+		"pin until we ship: what else breaks?",
+		"pin until numpy 2 ships: is that safe?",
+		"pin until v2 lands: what do you think?",
+		"pin until friday we ship: anything else?",
+		"pin until this release ships: ok?",
+		"pin until next release: is that sensible?",
+		"pin until 2 more fixes: then what?",
+	} {
+		if out := e.say(prompt, "s1"); out != "" {
+			t.Errorf("%q was taken as a command: %q", prompt, out)
 		}
 	}
 	if exists(pins) {
@@ -275,5 +297,34 @@ func TestKeepUntilOnExistingPin(t *testing.T) {
 	}
 	if l := lines(t, pins); len(l) != 1 || !strings.Contains(l[0], `"life":"keep"`) || !strings.Contains(l[0], `"until":"2026-11-06T00:00:00`) {
 		t.Errorf("stored = %v", l)
+	}
+}
+
+// With key=branch or key=repo, chats share one ledger folder: a new chat must not
+// silence the open ones, and each open chat is told, not just the first to speak.
+func TestSharedLedgerTellsEveryOpenChat(t *testing.T) {
+	for _, key := range []string{"branch", "repo"} {
+		t.Run(key, func(t *testing.T) {
+			e := setup(t)
+			t.Setenv("AGENT_LEDGER_KEY", key)
+			clock(t, monday)
+			e.injectRaw("startup", "s1")
+			e.injectRaw("startup", "s2")
+			blockMsg(t, e.say("PIN until 12h: no deploys", "s1"))
+
+			clock(t, monday.Add(13*time.Hour))
+			e.injectRaw("startup", "s3")
+			if out := e.say("hello", "s3"); strings.Contains(out, "expired") {
+				t.Errorf("new chat told about a pin it never had: %q", out)
+			}
+			for _, sid := range []string{"s1", "s2"} {
+				if m := sysMsg(t, e.say("hello", sid)); !strings.Contains(m, "no deploys") {
+					t.Errorf("open chat %s not told: %q", sid, m)
+				}
+				if out := e.say("hello again", sid); strings.Contains(out, "expired") {
+					t.Errorf("chat %s told twice: %q", sid, out)
+				}
+			}
+		})
 	}
 }

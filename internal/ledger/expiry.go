@@ -209,8 +209,16 @@ func expiredPins(cwd, dir, here string) []located {
 	return out
 }
 
-// seenKey names one expiry: a pin given a new end date expires anew.
-func seenKey(p Pin) string { return p.ID + "@" + p.Until }
+// seenKey names one expiry for one chat: a pin given a new end date expires
+// anew. With key=branch or key=repo, chats share a ledger folder, so the session
+// id keeps one chat's "told" or "never had it" from silencing another.
+func seenKey(sid string, p Pin) string {
+	k := p.ID + "@" + p.Until
+	if sid != "" {
+		k = sid + "|" + k
+	}
+	return k
+}
 
 func readSeen(dir string) map[string]bool {
 	seen := map[string]bool{}
@@ -231,11 +239,11 @@ func addSeen(dir string, keys []string) {
 
 // markExpiredSeen records the pins already expired when a chat starts (or is
 // cleared): they were never in its context, so there is nothing to tell it.
-func markExpiredSeen(cwd, dir string) {
+func markExpiredSeen(cwd, dir, sid string) {
 	seen := readSeen(dir)
 	var keys []string
 	for _, p := range expiredPins(cwd, dir, "") {
-		if k := seenKey(p.Pin); !seen[k] {
+		if k := seenKey(sid, p.Pin); !seen[k] {
 			keys = append(keys, k)
 		}
 	}
@@ -243,9 +251,9 @@ func markExpiredSeen(cwd, dir string) {
 }
 
 // takeExpired deletes pins expired more than ExpiredGraceDays ago and returns,
-// once per ledger, the ones that expired since this chat last heard: a line for
+// once per chat, the ones that expired since this chat last heard: a line for
 // the user and context for the model. Both are "" when nothing expired.
-func takeExpired(cwd, dir, here string) (user, agent string) {
+func takeExpired(cwd, dir, here, sid string) (user, agent string) {
 	if !anyDated(dir) {
 		return "", ""
 	}
@@ -258,7 +266,7 @@ func takeExpired(cwd, dir, here string) (user, agent string) {
 	var fresh []located
 	var keys []string
 	for _, p := range exp {
-		if k := seenKey(p.Pin); !seen[k] {
+		if k := seenKey(sid, p.Pin); !seen[k] {
 			seen[k] = true
 			fresh, keys = append(fresh, p), append(keys, k)
 		}
@@ -379,4 +387,18 @@ func staleNudge(cwd, root, dir string, days int) string {
 	}
 	return fmt.Sprintf("ledger: %s pinned over %d days ago with no end date: %s%s. Still true? UNPIN: <id> drops one, PROMOTE: <id> makes it a project rule, PIN [<id>] until <when>: <same text> gives it an end date.",
 		plural(len(old), "pin"), days, refList(shown), more)
+}
+
+// chatID is the session id that expiry notices are tracked by, "" when the
+// agent gave none (then every chat on the ledger shares one record).
+func chatID(sid string) string {
+	if sid == "" {
+		sid = SessionFromEnv()
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '|' {
+			return -1
+		}
+		return r
+	}, sid)
 }
