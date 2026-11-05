@@ -38,6 +38,7 @@ type Config struct {
 	Logging       string `json:"logging"`        // all | pins-only | off: which prompts are logged
 	Redact        string `json:"redact"`         // on | off: mask secrets before storing
 	PromoteTo     string `json:"promote_to"`     // file PROMOTE: appends to; "" = AGENTS.md, else CLAUDE.md
+	StaleDays     int    `json:"stale_days"`     // age of a pin with no end date that startup names; 0 = never
 
 	Source   map[string]string `json:"-"` // field -> where its value came from
 	Problems []string          `json:"-"` // ignored keys and values
@@ -65,13 +66,14 @@ func (c *Config) fields() []field {
 		{name: "logging", str: &c.Logging, allowed: []string{"all", "pins-only", "off"}},
 		{name: "redact", str: &c.Redact, allowed: []string{"on", "off"}},
 		{name: "promote_to", str: &c.PromoteTo, pattern: promoteRe},
+		{name: "stale_days", num: &c.StaleDays, minimum: 0, maxi: 3650},
 	}
 }
 
 // DefaultConfig is today's behaviour.
 func DefaultConfig() Config {
 	c := Config{Key: KeySession, PruneDays: PruneDays, RecentPrompts: RecentPrompts,
-		BudgetBytes: Budget, Logging: "pins-only", Redact: "on", Source: map[string]string{}}
+		BudgetBytes: Budget, Logging: "pins-only", Redact: "on", StaleDays: StaleDays, Source: map[string]string{}}
 	for _, f := range c.fields() {
 		c.Source[f.name] = "default"
 	}

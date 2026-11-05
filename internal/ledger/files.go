@@ -25,6 +25,8 @@ type Pin struct {
 	TS   string `json:"ts,omitempty"`
 	Text string `json:"text"`
 	Life string `json:"life,omitempty"` // "" | keep (PIN!) | carry (CARRY)
+	// Until is when the pin stops applying (RFC 3339), from PIN until <when>:.
+	Until string `json:"until,omitempty"`
 }
 
 // Prompt is one logged user prompt.
@@ -176,11 +178,12 @@ func LogError(dir, msg string) {
 // Status is one line: what the ledger in dir holds. Pin size is chars/4, an estimate.
 func Status(dir string) string {
 	chars := 0
-	for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
+	pins := readPins(filepath.Join(dir, PinnedFile))
+	for _, p := range pins {
 		chars += len(p.Text) + 1
 	}
 	return fmt.Sprintf("ledger: %s (~%d tokens) | %s | %s",
-		plural(countLines(filepath.Join(dir, PinnedFile)), "pin"), chars/4,
+		plural(len(pins), "pin"), chars/4,
 		plural(countLines(filepath.Join(dir, PromptsFile)), "logged prompt"),
 		plural(countLines(filepath.Join(dir, ErrorsFile)), "error"))
 }

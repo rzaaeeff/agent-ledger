@@ -88,13 +88,19 @@ func ClearPins(dir, root, sid, cwd string) (noted bool, err error) {
 			}
 			switch p.Life {
 			case LifeKeep:
-				kept = append(kept, p)
+				// An expired PIN! stays put until purged; it is not handed over or reported.
+				if !p.expired(Now()) {
+					kept = append(kept, p)
+				}
 				keep = append(keep, l)
 				continue
 			case LifeCarry:
 				carry = append(carry, p)
 			default:
-				drop = append(drop, Pin{ID: p.ID, Text: p.Text})
+				// An expired pin no longer applied, so it is not reported as dropped.
+				if !p.expired(Now()) {
+					drop = append(drop, Pin{ID: p.ID, Text: p.Text})
+				}
 			}
 			gone = append(gone, l)
 		}

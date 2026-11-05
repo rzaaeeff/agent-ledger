@@ -121,11 +121,12 @@ type pinCmd struct {
 	scope string // "" (session) | branch | repo | global, or an unknown word
 	ref   string // PIN [ref]: rewords the pin ref selects
 	text  string
+	until string // PIN until <when>: the <when> as typed
 	typed string // the verb as typed, e.g. "pin" (the scope may be lower case anyway)
 }
 
 // The ! may come before or after the scope, and a full-width colon counts too.
-var pinRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:[ \t]*@([a-z]+))?(!)?(?:[ \t]*\[([^\]\n]*)\])?[ \t]*[:：]`)
+var pinRe = regexp.MustCompile(`(?i)^(PIN|CARRY|UNPIN|PROMOTE)(!)?(?:[ \t]*@([a-z]+))?(!)?(?:[ \t]*\[([^\]\n]*)\])?(?:[ \t]+until[ \t]+([^\s:：,?!]+(?:[ \t]+[^\s:：,?!]+){0,2}))?[ \t]*[:：]`)
 
 // Look-alikes of a command that are not one: a wrong separator ("PIN; x",
 // "pin = x"), or the keyword in capitals without the colon ("PIN x").
@@ -177,12 +178,34 @@ func parsePin(prompt string) (pinCmd, bool) {
 	if m == nil {
 		return pinCmd{}, false
 	}
+	if !meantAsEndDate(m[1], m[6]) {
+		return pinCmd{}, false
+	}
 	text := prompt[len(m[0]):]
 	if i := strings.IndexAny(text, "\r\n"); i >= 0 {
 		text = text[:i]
 	}
 	return pinCmd{verb: strings.ToUpper(m[1]), keep: m[2] != "" || m[4] != "", scope: strings.ToLower(m[3]), ref: strings.TrimSpace(m[5]),
-		text: strings.TrimSpace(text), typed: m[1]}, true
+		text: strings.TrimSpace(text), until: m[6], typed: m[1]}, true
+}
+
+// datePhraseRe is a several-word end date as people write one: "10 nov",
+// "nov 10th", "next friday", "this week", "2026-11-10 18" (the ":00" ends the match).
+var datePhraseRe = regexp.MustCompile(`^(?:\d{1,2}(?:st|nd|rd|th)? ` + monthRe + `|` + monthRe + ` \d{1,2}(?:st|nd|rd|th)?|(?:next|this) (?:mon|tue|wed|thu|fri|sat|sun)[a-z]*|(?:next|this) (?:week|month)|\d{4}-\d{1,2}-\d{1,2} \d{1,2}(?:[ap]m)?)$`)
+
+const monthRe = `(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)`
+
+// meantAsEndDate tells a dated pin with a several-word end date ("PIN until next
+// friday:", "pin until 10 Nov:"), which is refused with help, from a sentence
+// that happens to start "pin until ...:" and goes to the agent untouched. One
+// word, or the verb in capitals, is a command as before; in lower case the words
+// must look like a date.
+func meantAsEndDate(typed, until string) bool {
+	f := strings.Fields(strings.ToLower(until))
+	if len(f) < 2 || typed == strings.ToUpper(typed) {
+		return true
+	}
+	return datePhraseRe.MatchString(strings.Join(f, " "))
 }
 
 // pinID is sha1(text)[:6] for session pins (as before scopes existed) and
@@ -217,6 +240,9 @@ func pinLines(pins []Pin, tag bool) []string {
 		if tag && p.Life == LifeKeep {
 			line += " (kept across /clear)"
 		}
+		if t, ok := p.until(); ok {
+			line += " (applies until " + whenAgent(t) + ", then stops)"
+		}
 		out = append(out, line)
 	}
 	return out
@@ -226,7 +252,7 @@ func pinLines(pins []Pin, tag bool) []string {
 // wait for the next /clear.
 func sessionPins(dir string) []Pin {
 	var out []Pin
-	for _, p := range ReadJSONL[Pin](filepath.Join(dir, PinnedFile)) {
+	for _, p := range readPins(filepath.Join(dir, PinnedFile)) {
 		if p.Life != LifeCarry {
 			out = append(out, p)
 		}
@@ -238,7 +264,7 @@ func sessionPins(dir string) []Pin {
 func scopedSections(cwd, dir string) string {
 	var b strings.Builder
 	for _, s := range PinScopes(cwd, dir) {
-		if ls := pinLines(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)), false); len(ls) > 0 {
+		if ls := pinLines(readPins(filepath.Join(s.Dir, PinnedFile)), false); len(ls) > 0 {
 			fmt.Fprintf(&b, "\n### %s\n%s", s.Label, strings.Join(ls, "\n"))
 		}
 	}
@@ -259,7 +285,7 @@ func ScopeStatus(cwd, dir string) string {
 		case s.Name == ScopeRepo && IsFolder(filepath.Dir(dir)):
 			name = "folder"
 		}
-		n := len(ReadJSONL[Pin](filepath.Join(s.Dir, PinnedFile)))
+		n := len(readPins(filepath.Join(s.Dir, PinnedFile)))
 		total += n
 		parts = append(parts, fmt.Sprintf("%s %d", name, n))
 	}

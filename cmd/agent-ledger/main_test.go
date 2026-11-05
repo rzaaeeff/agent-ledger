@@ -30,7 +30,7 @@ func setup(t *testing.T) *env {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(state, "config"))
 	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_ENV_FILE", "AGENT_LEDGER_DEBUG",
 		"AGENT_LEDGER_KEY", "AGENT_LEDGER_CLEAR", "AGENT_LEDGER_PRUNE_DAYS", "AGENT_LEDGER_RECENT_PROMPTS",
-		"AGENT_LEDGER_BUDGET_BYTES", "AGENT_LEDGER_REDACT", "AGENT_LEDGER_PROMOTE_TO"} {
+		"AGENT_LEDGER_BUDGET_BYTES", "AGENT_LEDGER_REDACT", "AGENT_LEDGER_PROMOTE_TO", "AGENT_LEDGER_STALE_DAYS"} {
 		t.Setenv(k, "")
 	}
 	// Most tests cover prompt logging; the default (pins-only) has its own test.
